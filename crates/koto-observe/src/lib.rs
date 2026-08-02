@@ -4,6 +4,7 @@
 //! successful observer wins, preserving the structured-before-pixels rule.
 
 use koto_core::{CoreError, Observation};
+pub mod screencopy;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rung {

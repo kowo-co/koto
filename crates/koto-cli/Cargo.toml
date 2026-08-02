@@ -8,6 +8,7 @@ license.workspace = true
 clap.workspace = true
 koto-core = { path = "../koto-core" }
 koto-hypr = { path = "../koto-hypr" }
+koto-observe = { path = "../koto-observe" }
 koto-policy = { path = "../koto-policy" }
 koto-tmux = { path = "../koto-tmux" }
 regex.workspace = true

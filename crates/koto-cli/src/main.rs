@@ -146,22 +146,39 @@ impl Backend for Runtime {
         self.hypr.focus(selector)
     }
     fn observe(&mut self, mode: ObserveMode) -> Result<Observation, CoreError> {
-        if matches!(mode, ObserveMode::Image | ObserveMode::Both) {
-            return Err(CoreError::ObservationUnavailable(
-                "screencopy backend unavailable".into(),
-            ));
+        let image = if matches!(mode, ObserveMode::Image | ObserveMode::Both) {
+            Some(
+                koto_observe::screencopy::capture_png(&observation_image_path())?
+                    .display()
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+        if mode == ObserveMode::Image {
+            return Ok(Observation {
+                source: "pixels".into(),
+                fidelity: "image".into(),
+                text: None,
+                image,
+            });
         }
-        if let Ok(text) = self.tmux.read_active(None) {
+        let mut observation = if let Ok(text) = self.tmux.read_active(None) {
             if !text.is_empty() {
-                return Ok(Observation {
+                Observation {
                     source: "tmux".into(),
                     fidelity: "exact".into(),
                     text: Some(text),
                     image: None,
-                });
+                }
+            } else {
+                self.hypr.observe(mode)?
             }
-        }
-        self.hypr.observe(mode)
+        } else {
+            self.hypr.observe(mode)?
+        };
+        observation.image = image;
+        Ok(observation)
     }
     fn list(&mut self, subject: &str) -> Result<String, CoreError> {
         self.hypr.list(subject)
@@ -298,6 +315,19 @@ fn run(cli: Cli) -> Result<i32, CoreError> {
     }
     print_execution(&execution, cli.format, cli.seat);
     Ok(execution.registers.status)
+}
+fn observation_image_path() -> std::path::PathBuf {
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("koto/obs");
+    base.join(format!(
+        "{}.png",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    ))
 }
 fn abort_path() -> std::path::PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
