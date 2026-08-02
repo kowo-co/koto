@@ -1,9 +1,11 @@
 use clap::{Parser, ValueEnum};
 use koto_core::{
-    CoreError, DEFAULT_OP_BUDGET, Execution, ObserveMode, Program, Vm, parse_inline, parse_script,
+    Backend, CoreError, DEFAULT_OP_BUDGET, Execution, Observation, ObserveMode, Program, Vm, Wait,
+    parse_inline, parse_script,
 };
 use koto_hypr::HyprBackend;
-use koto_policy::{Policy, split_capabilities};
+use koto_policy::{Policy, default_path, split_capabilities};
+use koto_tmux::Tmux;
 use serde::Serialize;
 use std::{fs, process::ExitCode, time::Duration};
 
@@ -80,6 +82,96 @@ enum Seat {
     Auto,
 }
 
+struct Runtime {
+    hypr: HyprBackend,
+    tmux: Tmux,
+}
+impl Default for Runtime {
+    fn default() -> Self {
+        Self {
+            hypr: HyprBackend,
+            tmux: Tmux::default(),
+        }
+    }
+}
+impl Backend for Runtime {
+    fn key(&mut self, keys: &[String]) -> Result<(), CoreError> {
+        self.hypr.key(keys)
+    }
+    fn text(&mut self, text: &str, paste: bool) -> Result<(), CoreError> {
+        self.hypr.text(text, paste)
+    }
+    fn wait(&mut self, wait: &Wait, timeout: Duration) -> Result<(), CoreError> {
+        self.hypr.wait(wait, timeout)
+    }
+    fn focus(&mut self, selector: &str) -> Result<(), CoreError> {
+        self.hypr.focus(selector)
+    }
+    fn observe(&mut self, mode: ObserveMode) -> Result<Observation, CoreError> {
+        if mode != ObserveMode::Image {
+            if let Ok(text) = self.tmux.read(None) {
+                if !text.is_empty() {
+                    return Ok(Observation {
+                        source: "tmux".into(),
+                        fidelity: "exact".into(),
+                        text: Some(text),
+                        image: None,
+                    });
+                }
+            }
+        }
+        self.hypr.observe(mode)
+    }
+    fn list(&mut self, subject: &str) -> Result<String, CoreError> {
+        self.hypr.list(subject)
+    }
+    fn pane(
+        &mut self,
+        action: &str,
+        args: &[String],
+        timeout: Duration,
+    ) -> Result<Option<String>, CoreError> {
+        match action {
+            "new" => Ok(Some(self.tmux.new_pane(args.first().map(String::as_str))?)),
+            "send" => {
+                self.tmux.send(&args.join(" "), false)?;
+                Ok(None)
+            }
+            "run" => {
+                self.tmux.send(&args.join(" "), true)?;
+                Ok(None)
+            }
+            "read" => Ok(Some(
+                self.tmux.read(
+                    args.first()
+                        .map(|value| value.parse())
+                        .transpose()
+                        .map_err(|_| CoreError::Parse("pane read needs an integer".into()))?,
+                )?,
+            )),
+            "wait" => {
+                self.tmux.wait(
+                    args.first()
+                        .ok_or_else(|| CoreError::Parse("pane wait needs a pattern".into()))?,
+                    timeout,
+                )?;
+                Ok(None)
+            }
+            "kill" => {
+                self.tmux.kill(args.first().map(String::as_str))?;
+                Ok(None)
+            }
+            _ => Err(CoreError::Parse(format!("unknown pane action `{action}`"))),
+        }
+    }
+    fn spawn(&mut self, command: &[String]) -> Result<String, CoreError> {
+        self.hypr.spawn(command)
+    }
+    fn window(&mut self, action: &str, args: &[String]) -> Result<(), CoreError> {
+        self.hypr.window(action, args)
+    }
+}
+
 fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
@@ -90,6 +182,10 @@ fn main() -> ExitCode {
     }
 }
 fn run(cli: Cli) -> Result<(), CoreError> {
+    if cli.instruction.len() == 2 && cli.instruction[0] == "stdlib" && cli.instruction[1] == "sync"
+    {
+        return sync_stdlib();
+    }
     let mut program = load_program(&cli)?;
     apply_observe_policy(&mut program, cli.observe.into());
     if cli.explain {
@@ -101,7 +197,7 @@ fn run(cli: Cli) -> Result<(), CoreError> {
         print_plan(&program, cli.format);
         return Ok(());
     }
-    let policy = Policy::default_profile();
+    let (policy, profile) = Policy::load(&default_path(), &cli.profile)?;
     let capabilities = policy.effective(
         &split_capabilities(&cli.allow),
         &split_capabilities(&cli.deny),
@@ -117,19 +213,82 @@ fn run(cli: Cli) -> Result<(), CoreError> {
         .flatten()
         .collect();
     policy.require_all(&capabilities, &required)?;
-    let mut backend = HyprBackend;
+    let registers = load_session(&cli.session)?;
+    let mut backend = Runtime::default();
     let mut vm = Vm {
         backend: &mut backend,
         capabilities,
-        op_budget: cli.budget_ops,
-        time_budget: cli.budget_time,
+        op_budget: profile.budget_ops.unwrap_or(cli.budget_ops),
+        time_budget: profile
+            .budget_time
+            .as_deref()
+            .map(duration)
+            .transpose()
+            .map_err(CoreError::Parse)?
+            .unwrap_or(cli.budget_time),
         default_timeout: cli.timeout,
+        registers,
     };
     let execution = vm.run(&program)?;
+    save_session(&cli.session, &execution.registers)?;
     if let Some(path) = cli.trace {
         append_trace(&path, &execution)?;
     }
     print_execution(&execution, cli.format, cli.seat);
+    Ok(())
+}
+fn sync_stdlib() -> Result<(), CoreError> {
+    let config = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| ".".into())
+        .join(".config/hypr/bindings.conf");
+    let source = fs::read_to_string(&config)
+        .map_err(|error| CoreError::Backend(format!("{}: {error}", config.display())))?;
+    let mut output = format!(
+        "; auto-generated by koto stdlib sync from {}\n",
+        config.display()
+    );
+    for line in source
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("bind") && line.contains(", exec,"))
+    {
+        let values: Vec<_> = line.splitn(5, ',').map(str::trim).collect();
+        if values.len() < 5 {
+            continue;
+        }
+        let modifiers = values[1]
+            .replace('$', "")
+            .replace("mainMod", "super")
+            .replace(' ', "")
+            .to_lowercase();
+        let key = values[2].to_lowercase();
+        let command = values[4];
+        let name = command
+            .split_whitespace()
+            .next()
+            .unwrap_or("binding")
+            .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+            .replace(|c: char| !c.is_ascii_alphanumeric(), "_")
+            .to_lowercase();
+        if name.is_empty() {
+            continue;
+        }
+        output.push_str(&format!(
+            "\ndef omarchy.{name}()\n  key {modifiers} {key}\n  wait idle 150ms\nenddef\n"
+        ));
+    }
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".local/share"))
+        })
+        .unwrap_or_else(|| ".".into())
+        .join("koto/stdlib");
+    fs::create_dir_all(&base).map_err(|error| CoreError::Backend(error.to_string()))?;
+    let destination = base.join("omarchy.basm");
+    fs::write(&destination, output).map_err(|error| CoreError::Backend(error.to_string()))?;
+    println!("{}", destination.display());
     Ok(())
 }
 fn load_program(cli: &Cli) -> Result<Program, CoreError> {
@@ -149,6 +308,11 @@ fn load_program(cli: &Cli) -> Result<Program, CoreError> {
     for path in paths {
         let source = fs::read_to_string(&path)
             .map_err(|e| CoreError::Backend(format!("{}: {e}", path.display())))?;
+        let source = expand_includes(
+            &source,
+            path.parent().unwrap_or_else(|| std::path::Path::new(".")),
+            0,
+        )?;
         let bound = bind_arguments(&source, arguments);
         let mut program = parse_script(&bound)
             .map_err(|e| CoreError::Parse(format!("{}: {e}", path.display())))?;
@@ -158,6 +322,65 @@ fn load_program(cli: &Cli) -> Result<Program, CoreError> {
         all.extend(program.instructions);
     }
     Ok(Program { instructions: all })
+}
+fn expand_includes(source: &str, base: &std::path::Path, depth: u8) -> Result<String, CoreError> {
+    if depth >= 16 {
+        return Err(CoreError::Parse("include nesting exceeds 16 files".into()));
+    }
+    let mut expanded = String::new();
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if let Some(argument) = trimmed.strip_prefix("include ") {
+            let file = argument.trim().trim_matches('"');
+            if file.is_empty() || std::path::Path::new(file).is_absolute() || file.contains("..") {
+                return Err(CoreError::Parse(format!("unsafe include `{file}`")));
+            }
+            let path = base.join(file);
+            let child = fs::read_to_string(&path)
+                .map_err(|error| CoreError::Backend(format!("{}: {error}", path.display())))?;
+            expanded.push_str(&expand_includes(
+                &child,
+                path.parent().unwrap_or(base),
+                depth + 1,
+            )?);
+            expanded.push('\n');
+        } else {
+            expanded.push_str(line);
+            expanded.push('\n');
+        }
+    }
+    Ok(expanded)
+}
+fn session_path(name: &str) -> Result<std::path::PathBuf, CoreError> {
+    if name.is_empty() || name.contains('/') || name.contains("..") {
+        return Err(CoreError::Parse("invalid session name".into()));
+    }
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".local/state"))
+        })
+        .unwrap_or_else(|| ".".into());
+    Ok(base.join("koto/sessions").join(format!("{name}.json")))
+}
+fn load_session(name: &str) -> Result<koto_core::Registers, CoreError> {
+    let path = session_path(name)?;
+    if !path.exists() {
+        return Ok(koto_core::Registers::default());
+    }
+    let source = fs::read_to_string(&path)
+        .map_err(|error| CoreError::Backend(format!("read {}: {error}", path.display())))?;
+    serde_json::from_str(&source)
+        .map_err(|error| CoreError::Parse(format!("{}: {error}", path.display())))
+}
+fn save_session(name: &str, registers: &koto_core::Registers) -> Result<(), CoreError> {
+    let path = session_path(name)?;
+    let parent = path.parent().unwrap();
+    fs::create_dir_all(parent)
+        .map_err(|error| CoreError::Backend(format!("create {}: {error}", parent.display())))?;
+    let encoded =
+        serde_json::to_vec(registers).map_err(|error| CoreError::Backend(error.to_string()))?;
+    fs::write(path, encoded).map_err(|error| CoreError::Backend(error.to_string()))
 }
 fn apply_observe_policy(program: &mut Program, requested: ObserveMode) {
     if requested == ObserveMode::Auto {

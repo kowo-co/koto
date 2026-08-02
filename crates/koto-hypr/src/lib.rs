@@ -197,6 +197,67 @@ impl Backend for HyprBackend {
             _ => Err(CoreError::Unsupported(format!("list {subject}"))),
         }
     }
+    fn window(&mut self, action: &str, args: &[String]) -> Result<(), CoreError> {
+        let command = match action {
+            "ws" => format!(
+                "workspace {}",
+                args.first()
+                    .ok_or_else(|| CoreError::Parse("ws needs a workspace".into()))?
+            ),
+            "send" => format!(
+                "movetoworkspace {}",
+                args.first()
+                    .ok_or_else(|| CoreError::Parse("send needs a workspace".into()))?
+            ),
+            "close" => match args.first() {
+                Some(selector) => {
+                    let window = self.resolve(selector)?;
+                    format!("closewindow address:{}", window.address)
+                }
+                None => "killactive".into(),
+            },
+            "float" => "togglefloating".into(),
+            "tile" => "settiled".into(),
+            "full" => "fullscreen".into(),
+            "pin" => "pin".into(),
+            "swap" => format!(
+                "swapwindow {}",
+                args.first()
+                    .ok_or_else(|| CoreError::Parse("swap needs a direction".into()))?
+            ),
+            "move" => format!(
+                "movewindow {}",
+                args.first()
+                    .ok_or_else(|| CoreError::Parse("move needs a direction".into()))?
+            ),
+            "monitor" => format!(
+                "focusmonitor {}",
+                args.first()
+                    .ok_or_else(|| CoreError::Parse("monitor needs a name".into()))?
+            ),
+            _ => return Err(CoreError::Unsupported(format!("window {action}"))),
+        };
+        self.dispatch(&command)
+    }
+    fn spawn(&mut self, command: &[String]) -> Result<String, CoreError> {
+        if command.is_empty() {
+            return Err(CoreError::Parse("spawn needs a command".into()));
+        }
+        let has_uwsm = Command::new("uwsm").arg("--version").output().is_ok();
+        let mut process = if has_uwsm {
+            let mut process = Command::new("uwsm");
+            process.arg("app").arg("--").args(command);
+            process
+        } else {
+            let mut process = Command::new(&command[0]);
+            process.args(&command[1..]);
+            process
+        };
+        let child = process
+            .spawn()
+            .map_err(|error| CoreError::Backend(format!("spawn {}: {error}", command[0])))?;
+        Ok(serde_json::json!({"pid": child.id(), "scope": serde_json::Value::Null}).to_string())
+    }
 }
 fn poll<F>(timeout: Duration, mut check: F) -> Result<(), CoreError>
 where

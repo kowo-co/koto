@@ -9,5 +9,6 @@ clap.workspace = true
 koto-core = { path = "../koto-core" }
 koto-hypr = { path = "../koto-hypr" }
 koto-policy = { path = "../koto-policy" }
+koto-tmux = { path = "../koto-tmux" }
 serde.workspace = true
 serde_json.workspace = true

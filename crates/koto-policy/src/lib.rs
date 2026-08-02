@@ -1,16 +1,34 @@
-//! Capability resolution. Denials are applied last and always win.
+//! Capability policy resolution. Denials are applied last and always win.
 
 use koto_core::CoreError;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fs, path::Path};
 
 pub const DEFAULT_ALLOW: &[&str] = &["input", "window", "spawn"];
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Profile {
+    #[serde(default)]
+    pub allow: BTreeSet<String>,
+    #[serde(default)]
+    pub deny: BTreeSet<String>,
+    pub budget_ops: Option<u32>,
+    pub budget_time: Option<String>,
+    pub seat: Option<String>,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Config {
+    #[serde(default)]
+    pub default: Profile,
+    #[serde(default, rename = "profile")]
+    pub profiles: std::collections::BTreeMap<String, Profile>,
+}
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Policy {
     pub allow: BTreeSet<String>,
     pub deny: BTreeSet<String>,
 }
+
 impl Policy {
     pub fn default_profile() -> Self {
         Self {
@@ -18,21 +36,33 @@ impl Policy {
             deny: BTreeSet::new(),
         }
     }
+    pub fn load(path: &Path, profile: &str) -> Result<(Self, Profile), CoreError> {
+        if !path.exists() {
+            return Ok((Self::default_profile(), Profile::default()));
+        }
+        let source = fs::read_to_string(path)
+            .map_err(|error| CoreError::Backend(format!("read {}: {error}", path.display())))?;
+        let config: Config = toml::from_str(&source)
+            .map_err(|error| CoreError::Parse(format!("{}: {error}", path.display())))?;
+        let selected = config.profiles.get(profile).cloned().unwrap_or_default();
+        let mut allow = if config.default.allow.is_empty() {
+            Self::default_profile().allow
+        } else {
+            config.default.allow
+        };
+        allow.extend(selected.allow.iter().cloned());
+        let mut deny = config.default.deny;
+        deny.extend(selected.deny.iter().cloned());
+        Ok((Self { allow, deny }, selected))
+    }
     pub fn effective(&self, allow: &[String], deny: &[String]) -> BTreeSet<String> {
         let mut effective = self.allow.clone();
         effective.extend(allow.iter().cloned());
-        effective.extend(self.deny.iter().map(|value| format!("!{value}")));
-        for value in deny {
-            effective.insert(format!("!{value}"));
-        }
-        let denied: Vec<_> = effective
-            .iter()
-            .filter_map(|value| value.strip_prefix('!').map(str::to_owned))
-            .collect();
-        for value in denied {
+        let mut revoked = self.deny.clone();
+        revoked.extend(deny.iter().cloned());
+        for value in revoked {
             effective.remove(&value);
         }
-        effective.retain(|value| !value.starts_with('!'));
         effective
     }
     pub fn require_all(
@@ -48,6 +78,16 @@ impl Policy {
     }
 }
 
+pub fn default_path() -> std::path::PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(|home| std::path::PathBuf::from(home).join(".config"))
+                .unwrap_or_else(|| ".".into())
+        })
+        .join("koto/policy.toml")
+}
 pub fn split_capabilities(values: &[String]) -> Vec<String> {
     values
         .iter()
@@ -71,5 +111,11 @@ mod tests {
                 .effective(&["web.eval".into()], &[])
                 .contains("web.eval")
         );
+    }
+    #[test]
+    fn profile_merges_with_default() {
+        let config: Config =
+            toml::from_str("[default]\nallow=['web']\n[profile.work]\ndeny=['web']\n").unwrap();
+        assert!(config.profiles.contains_key("work"));
     }
 }

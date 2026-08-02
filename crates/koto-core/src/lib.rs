@@ -712,9 +712,10 @@ pub struct Observation {
     pub text: Option<String>,
     pub image: Option<String>,
 }
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Registers {
     pub status: i32,
+    pub n: u32,
     pub out: String,
     pub values: std::collections::BTreeMap<String, String>,
 }
@@ -741,6 +742,43 @@ pub trait Backend {
     fn focus(&mut self, selector: &str) -> Result<(), CoreError>;
     fn observe(&mut self, mode: ObserveMode) -> Result<Observation, CoreError>;
     fn list(&mut self, subject: &str) -> Result<String, CoreError>;
+    /// Executes a pane action. A read action returns exact scrollback text.
+    fn pane(
+        &mut self,
+        _action: &str,
+        _args: &[String],
+        _timeout: Duration,
+    ) -> Result<Option<String>, CoreError> {
+        Err(CoreError::Unsupported("pane".into()))
+    }
+    fn spawn(&mut self, _command: &[String]) -> Result<String, CoreError> {
+        Err(CoreError::Unsupported("spawn".into()))
+    }
+    fn window(&mut self, _action: &str, _args: &[String]) -> Result<(), CoreError> {
+        Err(CoreError::Unsupported("window operation".into()))
+    }
+    fn checkpoint(&mut self, _name: &str, _rollback: bool) -> Result<(), CoreError> {
+        Err(CoreError::Unsupported("checkpoint".into()))
+    }
+    fn pointer(&mut self, _action: &str, _args: &[String]) -> Result<(), CoreError> {
+        Err(CoreError::Backend("virtual pointer unavailable".into()))
+    }
+    fn key_state(&mut self, _keys: &[String], _pressed: bool) -> Result<(), CoreError> {
+        Err(CoreError::Backend(
+            "virtual keyboard hold unavailable".into(),
+        ))
+    }
+    fn web(
+        &mut self,
+        _action: &str,
+        _args: &[String],
+        _timeout: Duration,
+    ) -> Result<Option<String>, CoreError> {
+        Err(CoreError::Backend("CDP target unavailable".into()))
+    }
+    fn metadata(&mut self, _field: &str) -> Result<String, CoreError> {
+        Err(CoreError::Backend("window metadata unavailable".into()))
+    }
 }
 
 pub struct Vm<'a, B: Backend> {
@@ -749,26 +787,191 @@ pub struct Vm<'a, B: Backend> {
     pub op_budget: u32,
     pub time_budget: Duration,
     pub default_timeout: Duration,
+    pub registers: Registers,
 }
 impl<'a, B: Backend> Vm<'a, B> {
     pub fn run(&mut self, program: &Program) -> Result<Execution, CoreError> {
         let started = std::time::Instant::now();
         let mut execution = Execution {
             observation: None,
-            registers: Registers::default(),
+            registers: self.registers.clone(),
             trace: Vec::new(),
             halted: false,
         };
+        // Require is preflight, even when it appears after a label or a macro.
         for instruction in &program.instructions {
-            if instruction.index as u32 >= self.op_budget {
+            if let Op::Require(caps) = &instruction.op {
+                for cap in caps {
+                    self.require(cap)?;
+                }
+            }
+        }
+        let mut labels = std::collections::BTreeMap::new();
+        let mut definitions = std::collections::BTreeMap::new();
+        let mut definition_ends = std::collections::BTreeMap::new();
+        let mut definition_stack = Vec::new();
+        let mut block_ends = std::collections::BTreeMap::new();
+        let mut block_stack = Vec::new();
+        for (pc, instruction) in program.instructions.iter().enumerate() {
+            match &instruction.op {
+                Op::Label(name) => {
+                    labels.insert(name.clone(), pc);
+                }
+                Op::Def(name) => {
+                    definitions.insert(name.trim_end_matches("()").to_owned(), pc + 1);
+                    definition_stack.push(pc);
+                }
+                Op::EndDef => {
+                    let start = definition_stack
+                        .pop()
+                        .ok_or_else(|| CoreError::Parse("enddef without def".into()))?;
+                    definition_ends.insert(start, pc);
+                }
+                Op::Rep(_) | Op::While { .. } => block_stack.push(pc),
+                Op::BlockEnd => {
+                    let start = block_stack
+                        .pop()
+                        .ok_or_else(|| CoreError::Parse("block end without loop".into()))?;
+                    block_ends.insert(start, pc);
+                }
+                _ => {}
+            }
+        }
+        let mut pc = 0usize;
+        let mut loops: Vec<(usize, usize, u32, u32)> = Vec::new();
+        let mut calls = Vec::new();
+        let mut operations = 0u32;
+        while pc < program.instructions.len() {
+            if operations >= self.op_budget {
                 return Err(CoreError::Budget("operations"));
             }
             if started.elapsed() > self.time_budget {
                 return Err(CoreError::Budget("wall clock"));
             }
+            let instruction = &program.instructions[pc];
             let tick = std::time::Instant::now();
-            let result = self.execute(&instruction.op, &mut execution);
-            let status = if result.is_ok() { 0 } else { 1 };
+            let mut next = pc + 1;
+            let result = match &instruction.op {
+                Op::Jump { kind, args } => {
+                    let should_jump = match kind.as_str() {
+                        "jmp" => true,
+                        "jz" => execution.registers.status == 0,
+                        "jnz" => execution.registers.status != 0,
+                        "je" => {
+                            args.get(0)
+                                .map(|register| self.register_value(register, &execution.registers))
+                                == Some(args.get(1).cloned().unwrap_or_default())
+                        }
+                        _ => false,
+                    };
+                    let label = if kind == "je" {
+                        args.get(2)
+                    } else {
+                        args.first()
+                    }
+                    .ok_or_else(|| CoreError::Parse(format!("{kind} needs a label")));
+                    match label {
+                        Ok(label) if should_jump => {
+                            next = labels.get(label).copied().ok_or_else(|| {
+                                CoreError::Parse(format!("unknown label `{label}`"))
+                            })?;
+                            Ok(())
+                        }
+                        Ok(_) => Ok(()),
+                        Err(error) => Err(error),
+                    }
+                }
+                Op::Label(_) => Ok(()),
+                Op::Rep(count) => {
+                    let end = block_ends
+                        .get(&pc)
+                        .copied()
+                        .ok_or_else(|| CoreError::Parse("rep has no block".into()))?;
+                    if *count == 0 {
+                        next = end + 1;
+                    } else {
+                        execution.registers.n = 1;
+                        loops.push((pc, end, *count, 1));
+                    }
+                    Ok(())
+                }
+                Op::While { predicate, max } => {
+                    let end = block_ends
+                        .get(&pc)
+                        .copied()
+                        .ok_or_else(|| CoreError::Parse("while has no block".into()))?;
+                    if !self.predicate(predicate, &execution.registers) {
+                        next = end + 1;
+                    } else {
+                        execution.registers.n = 1;
+                        loops.push((pc, end, *max, 1));
+                    }
+                    Ok(())
+                }
+                Op::BlockEnd => {
+                    let (start, end, max, current) = loops
+                        .last()
+                        .copied()
+                        .ok_or_else(|| CoreError::Parse("block end outside loop".into()))?;
+                    if end != pc {
+                        Err(CoreError::Parse("mismatched loop block".into()))
+                    } else if current >= max {
+                        loops.pop();
+                        next = pc + 1;
+                        Ok(())
+                    } else if matches!(&program.instructions[start].op, Op::While { predicate, .. } if !self.predicate(predicate, &execution.registers))
+                    {
+                        loops.pop();
+                        next = pc + 1;
+                        Ok(())
+                    } else {
+                        let next_count = current + 1;
+                        loops.last_mut().unwrap().3 = next_count;
+                        execution.registers.n = next_count;
+                        next = start + 1;
+                        Ok(())
+                    }
+                }
+                Op::EndDef => {
+                    next = calls
+                        .pop()
+                        .ok_or_else(|| CoreError::Parse("enddef outside call".into()))?;
+                    Ok(())
+                }
+                Op::Def(_) => {
+                    next = definition_ends
+                        .get(&pc)
+                        .copied()
+                        .ok_or_else(|| CoreError::Parse("unclosed def".into()))?
+                        + 1;
+                    Ok(())
+                }
+                Op::Call(label) => {
+                    calls.push(pc + 1);
+                    next = labels
+                        .get(label)
+                        .copied()
+                        .or_else(|| definitions.get(label).copied())
+                        .ok_or_else(|| {
+                            CoreError::Parse(format!("unknown label or definition `{label}`"))
+                        })?;
+                    Ok(())
+                }
+                Op::Ret => {
+                    next = calls
+                        .pop()
+                        .ok_or_else(|| CoreError::Parse("ret without call".into()))?;
+                    Ok(())
+                }
+                _ => self.execute(&instruction.op, &mut execution),
+            };
+            let status = match &instruction.op {
+                Op::Expect(predicate) if result.is_ok() => {
+                    i32::from(!self.predicate(predicate, &execution.registers))
+                }
+                _ if result.is_ok() => 0,
+                _ => 1,
+            };
             execution.registers.status = status;
             execution.trace.push(TraceEntry {
                 i: instruction.index,
@@ -779,10 +982,12 @@ impl<'a, B: Backend> Vm<'a, B> {
                     matches!(&instruction.op, Op::Wait(Wait { kind, .. }) if kind == "duration")
                         .then(|| "raw sleep is discouraged".into()),
             });
+            operations += 1;
             result?;
             if execution.halted {
                 break;
             }
+            pc = next;
         }
         Ok(execution)
     }
@@ -796,6 +1001,24 @@ impl<'a, B: Backend> Vm<'a, B> {
                 self.require("input")?;
                 self.backend.key(std::slice::from_ref(key))
             }
+            Op::Hold(keys) => {
+                self.require("input")?;
+                self.backend.key_state(keys, true)
+            }
+            Op::Release(keys) => {
+                self.require("input")?;
+                self.backend.key_state(keys, false)
+            }
+            Op::Click(selector) => {
+                self.require("pointer")?;
+                self.backend
+                    .pointer("click", std::slice::from_ref(selector))
+            }
+            Op::Scroll { direction, count } => {
+                self.require("pointer")?;
+                self.backend
+                    .pointer("scroll", &[direction.clone(), count.to_string()])
+            }
             Op::Type(text) => {
                 self.require("input")?;
                 self.backend.text(text, false)
@@ -808,6 +1031,22 @@ impl<'a, B: Backend> Vm<'a, B> {
             Op::Focus(selector) => {
                 self.require("window")?;
                 self.backend.focus(selector)
+            }
+            Op::Peek(field) => {
+                execution.registers.out = self.backend.metadata(field)?;
+                Ok(())
+            }
+            Op::Ocr => Err(CoreError::Backend("OCR backend unavailable".into())),
+            Op::Web { action, args } => {
+                if action == "eval" {
+                    self.require("web.eval")?;
+                } else {
+                    self.require("web")?;
+                }
+                if let Some(output) = self.backend.web(action, args, self.default_timeout)? {
+                    execution.registers.out = output;
+                }
+                Ok(())
             }
             Op::End(mode) => {
                 if *mode != ObserveMode::Silent {
@@ -833,6 +1072,69 @@ impl<'a, B: Backend> Vm<'a, B> {
                 execution.registers.out = output;
                 Ok(())
             }
+            Op::Pane { action, args } => {
+                if action == "run" {
+                    self.require("exec")?;
+                }
+                if let Some(output) = self.backend.pane(action, args, self.default_timeout)? {
+                    execution.registers.out = output;
+                }
+                Ok(())
+            }
+            Op::Spawn(command) => {
+                self.require("spawn")?;
+                execution.registers.out = self.backend.spawn(command)?;
+                Ok(())
+            }
+            Op::Workspace(workspace) => {
+                self.require("window")?;
+                self.backend.window("ws", std::slice::from_ref(workspace))
+            }
+            Op::SendWorkspace(workspace) => {
+                self.require("window")?;
+                self.backend.window("send", std::slice::from_ref(workspace))
+            }
+            Op::Close(selector) => {
+                self.require("window")?;
+                self.backend.window(
+                    "close",
+                    selector.as_ref().map(std::slice::from_ref).unwrap_or(&[]),
+                )
+            }
+            Op::WindowAction(action) => {
+                self.require("window")?;
+                self.backend.window(action, &[])
+            }
+            Op::Swap(direction) => {
+                self.require("window")?;
+                self.backend.window("swap", std::slice::from_ref(direction))
+            }
+            Op::Move(direction) => {
+                self.require("window")?;
+                self.backend.window("move", std::slice::from_ref(direction))
+            }
+            Op::Monitor(name) => {
+                self.require("window")?;
+                self.backend.window("monitor", std::slice::from_ref(name))
+            }
+            Op::Checkpoint(name) => {
+                self.require("fs")?;
+                self.backend.checkpoint(name, false)
+            }
+            Op::Rollback(name) => {
+                self.require("fs")?;
+                self.backend.checkpoint(name, true)
+            }
+            Op::Assert(predicate) => {
+                if self.predicate(predicate, &execution.registers) {
+                    Ok(())
+                } else {
+                    Err(CoreError::Assertion(predicate.clone()))
+                }
+            }
+            // `expect` is deliberately non-fatal. The run loop preserves its 1 in `$?`.
+            Op::Expect(_) => Ok(()),
+            Op::Note(_) => Ok(()),
             Op::Require(caps) => {
                 for cap in caps {
                     self.require(cap)?;
@@ -846,6 +1148,52 @@ impl<'a, B: Backend> Vm<'a, B> {
                 Ok(())
             }
             _ => Err(CoreError::Unsupported(op_name(op).into())),
+        }
+    }
+    fn predicate(&self, predicate: &str, registers: &Registers) -> bool {
+        let predicate = predicate.trim();
+        if let Some(pattern) = predicate.strip_prefix("text ~") {
+            return regex::Regex::new(pattern.trim_matches('"'))
+                .is_ok_and(|regex| regex.is_match(&registers.out));
+        }
+        if let Some(text) = predicate.strip_prefix("text contains ") {
+            return registers.out.contains(text.trim_matches('"'));
+        }
+        if let Some(pattern) = predicate.strip_prefix("title ~") {
+            return regex::Regex::new(pattern.trim_matches('"'))
+                .is_ok_and(|regex| regex.is_match(&registers.out));
+        }
+        for operator in ["==", "!=", "<=", ">=", "<", ">"] {
+            if let Some((left, right)) = predicate.split_once(operator) {
+                let left = self.register_value(left.trim(), registers);
+                let right = right.trim().trim_matches('"');
+                return match operator {
+                    "==" => left == right,
+                    "!=" => left != right,
+                    "<" => {
+                        left.parse::<f64>().unwrap_or(f64::NAN) < right.parse().unwrap_or(f64::NAN)
+                    }
+                    "<=" => {
+                        left.parse::<f64>().unwrap_or(f64::NAN) <= right.parse().unwrap_or(f64::NAN)
+                    }
+                    ">" => {
+                        left.parse::<f64>().unwrap_or(f64::NAN) > right.parse().unwrap_or(f64::NAN)
+                    }
+                    ">=" => {
+                        left.parse::<f64>().unwrap_or(f64::NAN) >= right.parse().unwrap_or(f64::NAN)
+                    }
+                    _ => false,
+                };
+            }
+        }
+        false
+    }
+    fn register_value(&self, register: &str, registers: &Registers) -> String {
+        match register {
+            "$?" => registers.status.to_string(),
+            "$out" => registers.out.clone(),
+            value if value.starts_with("$env.") => std::env::var(&value[5..]).unwrap_or_default(),
+            value => registers.values.get(value).cloned().unwrap_or_default(),
         }
     }
     fn require(&self, cap: &str) -> Result<(), CoreError> {
@@ -936,5 +1284,69 @@ mod tests {
         let selector = Selector::parse("class=chromium,title~\"Basecamp\"").unwrap();
         assert_eq!(selector.terms.len(), 2);
         assert_eq!(selector.terms[1].value, "Basecamp");
+    }
+    struct Null;
+    impl Backend for Null {
+        fn key(&mut self, _: &[String]) -> Result<(), CoreError> {
+            Ok(())
+        }
+        fn text(&mut self, _: &str, _: bool) -> Result<(), CoreError> {
+            Ok(())
+        }
+        fn wait(&mut self, _: &Wait, _: Duration) -> Result<(), CoreError> {
+            Ok(())
+        }
+        fn focus(&mut self, _: &str) -> Result<(), CoreError> {
+            Ok(())
+        }
+        fn observe(&mut self, _: ObserveMode) -> Result<Observation, CoreError> {
+            Ok(Observation {
+                source: "test".into(),
+                fidelity: "exact".into(),
+                text: None,
+                image: None,
+            })
+        }
+        fn list(&mut self, _: &str) -> Result<String, CoreError> {
+            Ok(String::new())
+        }
+    }
+    fn vm(backend: &mut Null) -> Vm<'_, Null> {
+        Vm {
+            backend,
+            capabilities: BTreeSet::new(),
+            op_budget: 32,
+            time_budget: Duration::from_secs(1),
+            default_timeout: Duration::from_secs(1),
+            registers: Registers::default(),
+        }
+    }
+    #[test]
+    fn repetitions_execute_a_bounded_body() {
+        let program = parse_script("rep 3 {\nnop\n}\nend silent\n").unwrap();
+        let execution = vm(&mut Null).run(&program).unwrap();
+        assert!(execution.halted);
+        assert_eq!(
+            execution
+                .trace
+                .iter()
+                .filter(|entry| entry.op == "nop")
+                .count(),
+            3
+        );
+    }
+    #[test]
+    fn definitions_are_skipped_until_called() {
+        let program = parse_script("def f()\nnop\nenddef\ncall f\nend silent\n").unwrap();
+        let execution = vm(&mut Null).run(&program).unwrap();
+        assert!(execution.halted);
+        assert_eq!(
+            execution
+                .trace
+                .iter()
+                .filter(|entry| entry.op == "nop")
+                .count(),
+            1
+        );
     }
 }
