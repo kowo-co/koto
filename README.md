@@ -125,6 +125,17 @@ judging you.
 
 ---
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kowo-co/koto/main/install.sh | sh
+```
+
+Builds from source (needs cargo), installs `koto` to `~/.local/bin`, and links
+the agent skill into `~/.claude/skills/koto` and `~/.agent/skills/koto` — one
+canonical copy under `~/.local/share/koto`, symlinked everywhere agents look.
+Read it first if piping curl into sh makes you itch; it should, and it's short.
+
 ## Build
 
 ```sh
