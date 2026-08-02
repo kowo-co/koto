@@ -599,6 +599,7 @@ dependencies = [
  "koto-observe",
  "koto-policy",
  "koto-tmux",
+ "koto-web",
  "regex",
  "serde",
  "serde_json",
@@ -669,6 +670,15 @@ version = "0.1.0"
 dependencies = [
  "koto-core",
  "regex",
+]
+
+[[package]]
+name = "koto-web"
+version = "0.1.0"
+dependencies = [
+ "koto-core",
+ "libc",
+ "serde_json",
 ]
 
 [[package]]

@@ -89,6 +89,7 @@ struct Runtime {
     hypr: HyprBackend,
     tmux: Tmux,
     last_image: Option<std::path::PathBuf>,
+    web: Option<koto_web::Cdp>,
 }
 impl Default for Runtime {
     fn default() -> Self {
@@ -96,6 +97,7 @@ impl Default for Runtime {
             hypr: HyprBackend::default(),
             tmux: Tmux::default(),
             last_image: None,
+            web: None,
         }
     }
 }
@@ -182,6 +184,21 @@ impl Backend for Runtime {
         };
         observation.image = image;
         Ok(observation)
+    }
+    fn web(
+        &mut self,
+        action: &str,
+        args: &[String],
+        timeout: Duration,
+    ) -> Result<Option<String>, CoreError> {
+        if action == "attach" {
+            self.web = Some(koto_web::Cdp::launch(args.first().map(String::as_str))?);
+            return Ok(None);
+        }
+        self.web
+            .as_mut()
+            .ok_or_else(|| CoreError::Backend("web attach has not established a CDP pipe".into()))?
+            .action(action, args, timeout)
     }
     fn ocr(&mut self) -> Result<String, CoreError> {
         let image = self.last_image.as_ref().ok_or_else(|| {

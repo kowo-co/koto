@@ -30,7 +30,7 @@ This is a live engineering checklist for `spec.md` v0.1.
 - [x] Hyprland focus/workspace/window/process/list controls and strict selector resolution.
 - [x] Hyprland event-socket idle waits plus window/gone/title/text/exit waits.
 - [x] Dedicated isolated tmux server and pane new/send/run/read/wait/kill operations.
-- [ ] CDP web transport and web instruction implementation.
+- [~] Managed Chromium CDP transport over `--remote-debugging-pipe`: attach/launch, goto, click, fill, read, wait, and eval. Attaching an already-running inherited pipe is pending.
 
 ## Observation
 
@@ -38,7 +38,7 @@ This is a live engineering checklist for `spec.md` v0.1.
 - [x] Hyprland metadata rung.
 - [x] In-process wlr-screencopy PNG rung, `end image`/`end both`, and JSON image inlining.
 - [x] OCR instruction over the latest capture when Tesseract is installed.
-- [ ] CDP accessibility rung.
+- [~] CDP accessibility snapshot is returned by `web read`; it is not yet an automatic top observation-ladder rung.
 - [x] AT-SPI2 bounded structured-tree rung.
 - [~] OCR uses the system Tesseract executable rather than an embedded engine.
 
