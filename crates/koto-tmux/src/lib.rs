@@ -62,10 +62,30 @@ impl Tmux {
             "-t",
             &self.session,
         ])?;
+        // tmux reports the pane the moment it exists, but the shell inside has
+        // not drawn a prompt yet. Returning here lets the next `pane run` race
+        // the shell's startup: the keys land before anything is listening and
+        // the command is silently lost. Wait for the pane to render something.
+        self.await_ready(&id)?;
         let name = name.unwrap_or(&id).to_owned();
         self.panes.insert(name.clone(), id);
         self.active = Some(name.clone());
         Ok(name)
+    }
+    /// Blocks until the pane has produced output, so it can accept keystrokes.
+    fn await_ready(&self, target: &str) -> Result<(), CoreError> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Ok(contents) = self.capture(target, None) {
+                if !contents.trim().is_empty() {
+                    return Ok(());
+                }
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        // A shell that prints no prompt is unusual but legal; the caller can
+        // still drive it, so this is not fatal.
+        Ok(())
     }
     pub fn send(&mut self, text: &str, enter: bool) -> Result<(), CoreError> {
         let target = self.target()?;
