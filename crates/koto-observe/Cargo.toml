@@ -6,6 +6,10 @@ license.workspace = true
 
 [dependencies]
 koto-core = { path = "../koto-core" }
+atspi-connection = "0.14"
+atspi-proxies = "0.14"
+futures-executor = "0.3"
+zbus = { version = "5.5", default-features = false, features = ["async-io"] }
 memmap2 = "0.9"
 png = "0.18"
 wayland-backend = "0.3.16"

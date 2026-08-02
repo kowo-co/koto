@@ -175,10 +175,10 @@ impl Backend for Runtime {
                     image: None,
                 }
             } else {
-                self.hypr.observe(mode)?
+                koto_observe::atspi::observe()?.unwrap_or(self.hypr.observe(mode)?)
             }
         } else {
-            self.hypr.observe(mode)?
+            koto_observe::atspi::observe()?.unwrap_or(self.hypr.observe(mode)?)
         };
         observation.image = image;
         Ok(observation)
