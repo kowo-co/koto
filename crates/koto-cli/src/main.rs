@@ -529,6 +529,7 @@ fn load_program(cli: &Cli) -> Result<Program, CoreError> {
             path.parent().unwrap_or_else(|| std::path::Path::new(".")),
             0,
         )?;
+        let source = expand_macros(&source)?;
         let bound = bind_arguments(&source, arguments);
         let mut program = parse_script(&bound)
             .map_err(|e| CoreError::Parse(format!("{}: {e}", path.display())))?;
@@ -566,6 +567,90 @@ fn expand_includes(source: &str, base: &std::path::Path, depth: u8) -> Result<St
         }
     }
     Ok(expanded)
+}
+/// Expands zero-or-more-parameter basm macros in a lexical preprocessing
+/// pass. Macro parameter references use `{{name}}` so they cannot collide
+/// with normal quoted text or registers.
+fn expand_macros(source: &str) -> Result<String, CoreError> {
+    #[derive(Clone)]
+    struct Macro {
+        params: Vec<String>,
+        body: Vec<String>,
+    }
+    let mut definitions = std::collections::BTreeMap::<String, Macro>::new();
+    let mut output = Vec::new();
+    let mut index = 0;
+    let lines: Vec<&str> = source.lines().collect();
+    while index < lines.len() {
+        let trimmed = lines[index].trim();
+        if let Some(definition) = trimmed.strip_prefix("def ") {
+            let Some((name, params)) = definition.split_once('(').and_then(|(name, rest)| {
+                rest.strip_suffix(')')
+                    .map(|params| (name.trim(), params.trim()))
+            }) else {
+                return Err(CoreError::Parse(format!("invalid def `{definition}`")));
+            };
+            let params = if params.is_empty() {
+                Vec::new()
+            } else {
+                params
+                    .split(',')
+                    .map(str::trim)
+                    .map(str::to_owned)
+                    .collect()
+            };
+            let mut body = Vec::new();
+            index += 1;
+            while index < lines.len() && lines[index].trim() != "enddef" {
+                body.push(lines[index].to_owned());
+                index += 1;
+            }
+            if index == lines.len() {
+                return Err(CoreError::Parse(format!("unclosed def `{name}`")));
+            }
+            definitions.insert(name.into(), Macro { params, body });
+            index += 1;
+            continue;
+        }
+        if let Some(call) = trimmed.strip_prefix("call ") {
+            if let Some((name, args)) = call.split_once('(').and_then(|(name, rest)| {
+                rest.strip_suffix(')')
+                    .map(|args| (name.trim(), args.trim()))
+            }) {
+                let definition = definitions
+                    .get(name)
+                    .ok_or_else(|| CoreError::Parse(format!("unknown macro `{name}`")))?
+                    .clone();
+                let args = if args.is_empty() {
+                    Vec::new()
+                } else {
+                    args.split(',').map(str::trim).map(str::to_owned).collect()
+                };
+                if args.len() != definition.params.len() {
+                    return Err(CoreError::Parse(format!(
+                        "macro `{name}` expects {} arguments, got {}",
+                        definition.params.len(),
+                        args.len()
+                    )));
+                }
+                output.push(format!("def {name}()"));
+                for body in &definition.body {
+                    let mut expanded = body.clone();
+                    for (param, arg) in definition.params.iter().zip(&args) {
+                        expanded = expanded.replace(&format!("{{{param}}}"), arg);
+                    }
+                    output.push(expanded);
+                }
+                output.push("enddef".into());
+                output.push(format!("call {name}"));
+                index += 1;
+                continue;
+            }
+        }
+        output.push(lines[index].to_owned());
+        index += 1;
+    }
+    Ok(output.join("\n"))
 }
 fn session_path(name: &str) -> Result<std::path::PathBuf, CoreError> {
     if name.is_empty() || name.contains('/') || name.contains("..") {

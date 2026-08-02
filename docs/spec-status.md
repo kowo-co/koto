@@ -19,7 +19,7 @@ This is a live engineering checklist for `spec.md` v0.1.
 - [x] Lexer, quoted strings, comments, mnemonic arity, bare chord shorthand, and the `end` collision rule.
 - [x] Registers, persistent sessions, labels, jumps, calls, returns, bounded `rep`, bounded `while`, definitions, and relative includes.
 - [x] `require`, `assert`, `expect`, `budget`, `note`, `nop`, and `halt`.
-- [~] Definition parameters and macro arguments are not bound.
+- [x] Definition parameters and macro arguments (`{{name}}`) are bound through lexical macro expansion.
 - [~] Predicates implement text/register comparisons and window exists/count; live-title semantics remain incomplete.
 - [ ] The unspecified `||` fallback example syntax is not supported.
 
