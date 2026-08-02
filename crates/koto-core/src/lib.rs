@@ -812,11 +812,14 @@ pub struct Vm<'a, B: Backend> {
     pub time_budget: Duration,
     pub default_timeout: Duration,
     pub registers: Registers,
+    /// Trace accumulated even when execution returns an error.
+    pub last_trace: Vec<TraceEntry>,
     /// A kill-switch marker checked before every instruction.
     pub cancel_file: Option<std::path::PathBuf>,
 }
 impl<'a, B: Backend> Vm<'a, B> {
     pub fn run(&mut self, program: &Program) -> Result<Execution, CoreError> {
+        self.last_trace.clear();
         let started = std::time::Instant::now();
         let mut execution = Execution {
             observation: None,
@@ -1017,6 +1020,8 @@ impl<'a, B: Backend> Vm<'a, B> {
                                 .then(|| "pointer instruction used".into())
                         }),
             });
+            self.last_trace
+                .push(execution.trace.last().unwrap().clone());
             operations += 1;
             result?;
             if execution.halted {
@@ -1450,6 +1455,7 @@ mod tests {
             time_budget: Duration::from_secs(1),
             default_timeout: Duration::from_secs(1),
             registers: Registers::default(),
+            last_trace: Vec::new(),
             cancel_file: None,
         }
     }

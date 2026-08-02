@@ -328,9 +328,18 @@ fn run(cli: Cli) -> Result<i32, CoreError> {
             .unwrap_or(cli.budget_time),
         default_timeout: cli.timeout,
         registers,
+        last_trace: Vec::new(),
         cancel_file: Some(abort_path()),
     };
-    let execution = vm.run(&program)?;
+    let execution = match vm.run(&program) {
+        Ok(execution) => execution,
+        Err(error) => {
+            if let Some(path) = cli.trace.as_deref() {
+                append_trace_entries(path, &vm.last_trace)?;
+            }
+            return Err(error);
+        }
+    };
     save_session(&cli.session, &execution.registers)?;
     if let Some(path) = cli.trace {
         append_trace(&path, &execution)?;
@@ -674,13 +683,19 @@ fn print_execution(execution: &Execution, format: Format, seat: Seat, inline_ima
     }
 }
 fn append_trace(path: &std::path::Path, execution: &Execution) -> Result<(), CoreError> {
+    append_trace_entries(path, &execution.trace)
+}
+fn append_trace_entries(
+    path: &std::path::Path,
+    entries: &[koto_core::TraceEntry],
+) -> Result<(), CoreError> {
     use std::io::Write;
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .map_err(|e| CoreError::Backend(e.to_string()))?;
-    for entry in &execution.trace {
+    for entry in entries {
         serde_json::to_writer(&mut file, entry).map_err(|e| CoreError::Backend(e.to_string()))?;
         writeln!(file).map_err(|e| CoreError::Backend(e.to_string()))?;
     }
