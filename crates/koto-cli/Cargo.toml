@@ -10,5 +10,6 @@ koto-core = { path = "../koto-core" }
 koto-hypr = { path = "../koto-hypr" }
 koto-policy = { path = "../koto-policy" }
 koto-tmux = { path = "../koto-tmux" }
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true

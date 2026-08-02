@@ -782,6 +782,9 @@ pub trait Backend {
     fn metadata(&mut self, _field: &str) -> Result<String, CoreError> {
         Err(CoreError::Backend("window metadata unavailable".into()))
     }
+    fn selector_count(&mut self, _selector: &str) -> Result<usize, CoreError> {
+        Err(CoreError::Backend("window query unavailable".into()))
+    }
 }
 
 pub struct Vm<'a, B: Backend> {
@@ -1177,8 +1180,31 @@ impl<'a, B: Backend> Vm<'a, B> {
             _ => Err(CoreError::Unsupported(op_name(op).into())),
         }
     }
-    fn predicate(&self, predicate: &str, registers: &Registers) -> bool {
+    fn predicate(&mut self, predicate: &str, registers: &Registers) -> bool {
         let predicate = predicate.trim();
+        if let Some(selector) = predicate.strip_prefix("window exists ") {
+            return self
+                .backend
+                .selector_count(selector)
+                .is_ok_and(|count| count > 0);
+        }
+        if let Some(rest) = predicate.strip_prefix("window count ") {
+            for operator in ["<=", ">=", "==", "!=", "<", ">"] {
+                if let Some((selector, wanted)) = rest.rsplit_once(operator) {
+                    let count = self.backend.selector_count(selector.trim()).unwrap_or(0) as i64;
+                    let wanted = wanted.trim().parse::<i64>().unwrap_or(-1);
+                    return match operator {
+                        "==" => count == wanted,
+                        "!=" => count != wanted,
+                        "<" => count < wanted,
+                        "<=" => count <= wanted,
+                        ">" => count > wanted,
+                        ">=" => count >= wanted,
+                        _ => false,
+                    };
+                }
+            }
+        }
         if let Some(pattern) = predicate.strip_prefix("text ~") {
             return regex::Regex::new(pattern.trim_matches('"'))
                 .is_ok_and(|regex| regex.is_match(&registers.out));

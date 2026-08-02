@@ -102,22 +102,52 @@ impl Backend for Runtime {
         self.hypr.text(text, paste)
     }
     fn wait(&mut self, wait: &Wait, timeout: Duration) -> Result<(), CoreError> {
-        self.hypr.wait(wait, timeout)
+        if wait.kind != "text" {
+            return self.hypr.wait(wait, timeout);
+        }
+        let limit = wait
+            .timeout
+            .as_deref()
+            .map(duration)
+            .transpose()
+            .map_err(CoreError::Parse)?
+            .unwrap_or(timeout);
+        let pattern = regex::Regex::new(&wait.value)
+            .map_err(|error| CoreError::Parse(format!("invalid text regex: {error}")))?;
+        let started = std::time::Instant::now();
+        loop {
+            if let Ok(observation) = self.observe(ObserveMode::Text) {
+                if observation
+                    .text
+                    .as_deref()
+                    .is_some_and(|text| pattern.is_match(text))
+                {
+                    return Ok(());
+                }
+            }
+            if started.elapsed() >= limit {
+                return Err(CoreError::Timeout(format!("wait text {}", wait.value)));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
     fn focus(&mut self, selector: &str) -> Result<(), CoreError> {
         self.hypr.focus(selector)
     }
     fn observe(&mut self, mode: ObserveMode) -> Result<Observation, CoreError> {
-        if mode != ObserveMode::Image {
-            if let Ok(text) = self.tmux.read(None) {
-                if !text.is_empty() {
-                    return Ok(Observation {
-                        source: "tmux".into(),
-                        fidelity: "exact".into(),
-                        text: Some(text),
-                        image: None,
-                    });
-                }
+        if matches!(mode, ObserveMode::Image | ObserveMode::Both) {
+            return Err(CoreError::ObservationUnavailable(
+                "screencopy backend unavailable".into(),
+            ));
+        }
+        if let Ok(text) = self.tmux.read(None) {
+            if !text.is_empty() {
+                return Ok(Observation {
+                    source: "tmux".into(),
+                    fidelity: "exact".into(),
+                    text: Some(text),
+                    image: None,
+                });
             }
         }
         self.hypr.observe(mode)
@@ -172,6 +202,9 @@ impl Backend for Runtime {
     }
     fn metadata(&mut self, field: &str) -> Result<String, CoreError> {
         self.hypr.metadata(field)
+    }
+    fn selector_count(&mut self, selector: &str) -> Result<usize, CoreError> {
+        Ok(self.hypr.resolve_all(selector)?.len())
     }
     fn window(&mut self, action: &str, args: &[String]) -> Result<(), CoreError> {
         self.hypr.window(action, args)

@@ -54,7 +54,7 @@ impl HyprBackend {
         serde_json::from_str(&output)
             .map_err(|e| CoreError::Backend(format!("invalid hyprctl clients JSON: {e}")))
     }
-    fn resolve_all(&self, raw: &str) -> Result<Vec<Window>, CoreError> {
+    pub fn resolve_all(&self, raw: &str) -> Result<Vec<Window>, CoreError> {
         let selector = Selector::parse(raw).map_err(CoreError::Backend)?;
         Ok(self
             .windows()?
@@ -342,6 +342,9 @@ impl Backend for HyprBackend {
             }
         }
         Ok(())
+    }
+    fn selector_count(&mut self, selector: &str) -> Result<usize, CoreError> {
+        Ok(self.resolve_all(selector)?.len())
     }
     fn metadata(&mut self, field: &str) -> Result<String, CoreError> {
         let window = self.resolve("focused")?;
