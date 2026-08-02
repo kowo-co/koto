@@ -340,9 +340,19 @@ fn parse_inline_mnemonic(tokens: &[String]) -> Result<(Op, usize), String> {
             };
             Ok((Op::See { register, mode }, used))
         }
-        _ => Err(format!(
-            "inline `{word}` is not yet supported; use --script for multi-operand instructions"
-        )),
+        _ => {
+            // Inline mode is an argv token stream. For every mnemonic whose
+            // operand list is not a chord, the next mnemonic starts the next
+            // instruction. Quotes have already been preserved by argv.
+            let consumed = tokens
+                .iter()
+                .skip(1)
+                .position(|token| is_mnemonic(token))
+                .map(|index| index + 1)
+                .unwrap_or(tokens.len());
+            let op = parse_tokens(&tokens[..consumed])?;
+            Ok((op, consumed))
+        }
     }
 }
 
@@ -1337,6 +1347,28 @@ mod tests {
         assert_eq!(program.instructions[1].op, Op::End(ObserveMode::Auto));
         let key_end = parse_inline(&["key".into(), "end".into()]).unwrap();
         assert_eq!(key_end.instructions[0].op, Op::Key(vec!["end".into()]));
+    }
+    #[test]
+    fn inline_supports_non_input_instructions() {
+        let program = parse_inline(&[
+            "ws".into(),
+            "2".into(),
+            "pane".into(),
+            "read".into(),
+            "20".into(),
+            "end".into(),
+            "silent".into(),
+        ])
+        .unwrap();
+        assert_eq!(program.instructions[0].op, Op::Workspace("2".into()));
+        assert_eq!(
+            program.instructions[1].op,
+            Op::Pane {
+                action: "read".into(),
+                args: vec!["20".into()]
+            }
+        );
+        assert_eq!(program.instructions[2].op, Op::End(ObserveMode::Silent));
     }
     #[test]
     fn loops_are_bounded() {
