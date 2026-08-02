@@ -112,6 +112,11 @@ configured in `~/.config/koto/policy.toml`, overridable per invocation.
 instruction zero, so a policy violation fails immediately instead of halfway
 through a mutation.
 
+The gate is on anything that *reaches* a shell, not just the obvious one:
+`pane new`, `pane send`, `pane run`, and `pane kill` all need `exec`, because
+`pane send "rm -rf /\n"` is every bit as much execution as `pane run` is.
+`pane read` will not start a shell to satisfy an observation.
+
 Pointer use is legal, gated, and always warning-bearing in the trace.
 Coordinates never appear in a well-written basm file. We're not your dad. We are
 judging you.

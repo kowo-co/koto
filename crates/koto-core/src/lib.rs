@@ -1146,7 +1146,13 @@ impl<'a, B: Backend> Vm<'a, B> {
                 Ok(())
             }
             Op::Pane { action, args } => {
-                if action == "run" {
+                // Every pane action that reaches a shell needs `exec`, not just
+                // `run`. `pane send "cmd\n"` executes exactly what `pane run`
+                // does, and `pane new` starts a shell in the first place, so
+                // gating only `run` left the capability trivially bypassable —
+                // an agent denied `exec` could still run arbitrary commands.
+                // `read` and `wait` observe a pane that already exists.
+                if matches!(action.as_str(), "new" | "send" | "run" | "kill") {
                     self.require("exec")?;
                 }
                 if let Some(output) = self.backend.pane(action, args, self.default_timeout)? {

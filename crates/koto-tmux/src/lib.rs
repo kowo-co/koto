@@ -104,7 +104,10 @@ impl Tmux {
         Ok(())
     }
     pub fn read(&mut self, lines: Option<usize>) -> Result<String, CoreError> {
-        let target = self.target()?;
+        // Deliberately does not create a pane. Reading is an observation, and
+        // implicitly starting a shell to satisfy one would hand out execution
+        // to a caller that was never granted it.
+        let target = self.target_existing()?;
         self.capture(&target, lines)
     }
     /// Reads only a pane explicitly created or selected by the program. Unlike
@@ -139,7 +142,7 @@ impl Tmux {
     pub fn wait(&mut self, pattern: &str, timeout: Duration) -> Result<(), CoreError> {
         let regex = regex::Regex::new(pattern.trim_start_matches('~'))
             .map_err(|error| CoreError::Parse(format!("invalid pane wait regex: {error}")))?;
-        let target = self.target()?;
+        let target = self.target_existing()?;
         let command = self.last_command.get(&target).cloned();
         let start = Instant::now();
         loop {
@@ -172,6 +175,17 @@ impl Tmux {
             self.active = self.panes.keys().next().cloned();
         }
         Ok(())
+    }
+    /// Resolves the active pane without creating one.
+    fn target_existing(&self) -> Result<String, CoreError> {
+        let name = self
+            .active
+            .as_ref()
+            .ok_or_else(|| CoreError::Backend("no koto pane is active; use `pane new` first".into()))?;
+        self.panes
+            .get(name)
+            .cloned()
+            .ok_or_else(|| CoreError::Backend("active pane disappeared".into()))
     }
     fn target(&mut self) -> Result<String, CoreError> {
         self.ensure()?;
