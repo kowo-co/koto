@@ -612,6 +612,7 @@ fn sync_stdlib() -> Result<(), CoreError> {
         }
         output.push_str("enddef\n");
     }
+    output.push_str(&webapp_macros(&source));
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| {
@@ -624,6 +625,35 @@ fn sync_stdlib() -> Result<(), CoreError> {
     fs::write(&destination, output).map_err(|error| CoreError::Backend(error.to_string()))?;
     println!("{}", destination.display());
     Ok(())
+}
+fn webapp_macros(source: &str) -> String {
+    let mut output = String::new();
+    for line in source
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains("omarchy-launch-webapp") || line.contains("--app="))
+    {
+        let url = line
+            .split('"')
+            .nth(1)
+            .filter(|value| value.starts_with("http"))
+            .or_else(|| {
+                line.split("--app=")
+                    .nth(1)
+                    .and_then(|value| value.split_whitespace().next())
+            })
+            .unwrap_or("about:blank");
+        let title = line.split('"').nth(3).unwrap_or(url);
+        let name = title
+            .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+            .replace(|c: char| !c.is_ascii_alphanumeric(), "_")
+            .to_lowercase();
+        if name.is_empty() {
+            continue;
+        }
+        output.push_str(&format!("\ndef omarchy.{name}()\n  expect window exists title~\"{title}\"\n  jz .{name}.exists\n  spawn omarchy-launch-webapp \"{url}\"\n  wait window title~\"{title}\" timeout 10s\n.{name}.exists:\n  focus title~\"{title}\"\n  web attach title~\"{title}\"\nenddef\n"));
+    }
+    output
 }
 fn load_program(cli: &Cli) -> Result<Program, CoreError> {
     let mut paths = cli.scripts.clone();
