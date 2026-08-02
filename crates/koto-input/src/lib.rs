@@ -5,7 +5,8 @@
 //! does not rely on `hyprctl sendshortcut`, uinput, or an input daemon.
 
 use std::{
-    fs::{self, File},
+    cell::RefCell,
+    fs,
     io::Write,
     os::fd::AsFd,
     path::PathBuf,
@@ -75,7 +76,7 @@ wayland_client::delegate_noop!(State: ignore ZwlrVirtualPointerV1);
 /// held modifiers remain held until explicitly released.
 pub struct InputBackend {
     connection: Connection,
-    _queue: EventQueue<State>,
+    queue: RefCell<EventQueue<State>>,
     keyboard: ZwpVirtualKeyboardV1,
     pointer: ZwlrVirtualPointerV1,
     keymap: xkb::Keymap,
@@ -103,13 +104,13 @@ impl InputBackend {
         let keyboard = keyboard_manager.create_virtual_keyboard(&seat, &qh, ());
         let pointer = pointer_manager.create_virtual_pointer(Some(&seat), &qh, ());
         let keymap = compile_keymap()?;
-        install_keymap(&keyboard, &keymap)?;
+        install_keymap(&connection, &keyboard, &keymap)?;
         connection
             .flush()
             .map_err(|error| InputError::Unavailable(error.to_string()))?;
         Ok(Self {
             connection,
-            _queue: queue,
+            queue: RefCell::new(queue),
             keyboard,
             pointer,
             keymap,
@@ -214,7 +215,18 @@ impl InputBackend {
     fn time(&self) -> u32 {
         self.started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32
     }
+    /// Push this batch to the compositor and drain everything it sent back.
+    ///
+    /// Wayland is bidirectional. A client that only ever writes lets the
+    /// compositor's outgoing buffer fill until it disconnects us, which
+    /// surfaces as a broken pipe on some later, unrelated keystroke. The
+    /// roundtrip both drains the queue and confirms the compositor consumed
+    /// this batch before the next instruction runs.
     fn flush(&self) -> Result<(), InputError> {
+        self.queue
+            .borrow_mut()
+            .roundtrip(&mut State)
+            .map_err(|error| InputError::Unavailable(error.to_string()))?;
         self.connection
             .flush()
             .map_err(|error| InputError::Unavailable(error.to_string()))
@@ -226,17 +238,43 @@ fn compile_keymap() -> Result<xkb::Keymap, InputError> {
     xkb::Keymap::new_from_names(&context, "", "", "", "", None, xkb::KEYMAP_COMPILE_NO_FLAGS)
         .ok_or_else(|| InputError::Unavailable("could not compile the active XKB keymap".into()))
 }
-fn install_keymap(keyboard: &ZwpVirtualKeyboardV1, keymap: &xkb::Keymap) -> Result<(), InputError> {
+fn install_keymap(
+    connection: &Connection,
+    keyboard: &ZwpVirtualKeyboardV1,
+    keymap: &xkb::Keymap,
+) -> Result<(), InputError> {
     let source = keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
     let path = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap_or_else(|| "/tmp".into()))
         .join(format!("koto-keymap-{}", std::process::id()));
-    let mut file =
-        File::create(&path).map_err(|error| InputError::Unavailable(error.to_string()))?;
+    // Must be readable, not just writable: the compositor mmaps this
+    // descriptor with PROT_READ, and `File::create` alone opens write-only,
+    // so the mapping fails with EACCES and comes back as a no-memory
+    // protocol error that kills the connection.
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .map_err(|error| InputError::Unavailable(error.to_string()))?;
     file.write_all(source.as_bytes())
+        .map_err(|error| InputError::Unavailable(error.to_string()))?;
+    // The keymap protocol hands the compositor a descriptor plus a byte count,
+    // and the compositor parses the mapping as a C string. The terminating NUL
+    // is part of the payload and must be counted; without it the keymap fails
+    // to compile and the compositor answers with a no-memory protocol error.
+    file.write_all(&[0])
         .map_err(|error| InputError::Unavailable(error.to_string()))?;
     file.flush()
         .map_err(|error| InputError::Unavailable(error.to_string()))?;
-    keyboard.keymap(1, file.as_fd(), source.len() as u32);
+    keyboard.keymap(1, file.as_fd(), source.len() as u32 + 1);
+    // The request only carries the descriptor when it reaches the socket, so
+    // the file has to outlive the flush. Dropping it first hands the
+    // compositor a closed fd, which it answers with a protocol error that
+    // kills the connection on some later, unrelated keystroke.
+    connection
+        .flush()
+        .map_err(|error| InputError::Unavailable(error.to_string()))?;
     let _ = fs::remove_file(path);
     Ok(())
 }
