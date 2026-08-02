@@ -222,3 +222,27 @@ fn write_png(
         .write_image_data(&rgba)
         .map_err(|error| CoreError::Backend(format!("PNG data: {error}")))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn xrgb_frame_encodes_a_png() {
+        let path =
+            std::env::temp_dir().join(format!("koto-screencopy-test-{}.png", std::process::id()));
+        write_png(
+            &path,
+            &[0, 0, 255, 0],
+            FrameBuffer {
+                format: wl_shm::Format::Xrgb8888,
+                width: 1,
+                height: 1,
+                stride: 4,
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(&fs::read(&path).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
+        let _ = fs::remove_file(path);
+    }
+}
