@@ -136,6 +136,7 @@ printf 'key super enter\nend text\n' | koto -
 cargo test --workspace     # parser, VM, registers, budgets
 tests/exit-contract.sh     # every documented exit code
 tests/integration.sh       # the four backends, against a live compositor
+tests/seat.sh              # persistent nested seats
 ```
 
 That last one earns its keep. A unit test cannot tell you the virtual keyboard's
@@ -178,9 +179,19 @@ and events, tmux control-mode panes, Chromium over CDP, the AT-SPI rung, wlroots
 screencopy, OCR via Tesseract, capabilities, budgets, btrfs checkpoints, and the
 C ABI.
 
-**Doesn't yet:** persistent nested seats (`--seat nested` tears down with the
-process), `kotod`, leases, network take-over. `wait idle` needs a quiet seat to
-mean anything — on a busy desktop the compositor never stops talking.
+**Doesn't yet:** `kotod`, leases, network take-over.
+
+**Nested seats** work and persist: `--seat nested` starts a second Hyprland the
+first time and attaches to it thereafter, so windows survive between
+invocations. Your desktop never sees them and they never see your keystrokes —
+which is also what makes `wait idle` meaningful again, since a private seat
+actually goes quiet. `--seat-status` and `--seat-stop` manage it.
+
+```sh
+koto --seat nested --allow window,spawn spawn alacritty end silent
+koto --seat nested --allow window list windows end text   # still there
+koto --seat-stop
+```
 
 Hyprland only, for now. The backends sit behind four traits, so another
 compositor is an implementation, not a rewrite.

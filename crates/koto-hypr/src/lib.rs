@@ -565,7 +565,14 @@ impl Backend for HyprBackend {
         if command.is_empty() {
             return Err(CoreError::Parse("spawn needs a command".into()));
         }
-        let has_uwsm = Command::new("uwsm").arg("--version").output().is_ok();
+        // `uwsm app --` hands the launch to the session manager, which starts
+        // the process in a fresh systemd scope with the *session's* environment.
+        // That is what you want on the user's desktop and exactly wrong inside a
+        // nested seat: the app would ignore this process's WAYLAND_DISPLAY and
+        // open on the desktop instead of the seat. Launch directly when a seat
+        // is in effect so the environment is inherited.
+        let nested = std::env::var_os("KOTO_SEAT").is_some();
+        let has_uwsm = !nested && Command::new("uwsm").arg("--version").output().is_ok();
         let mut process = if has_uwsm {
             let mut process = Command::new("uwsm");
             process.arg("app").arg("--").args(command);

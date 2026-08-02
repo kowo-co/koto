@@ -2,7 +2,6 @@
 
 use atspi_connection::AccessibilityConnection;
 use atspi_proxies::accessible::{AccessibleProxy, ObjectRefExt};
-use atspi_proxies::proxy_ext::ProxyExt;
 use futures_executor::block_on;
 use koto_core::{CoreError, Observation};
 

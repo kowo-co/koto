@@ -10,6 +10,8 @@ use koto_tmux::Tmux;
 use serde::Serialize;
 use std::{fs, process::ExitCode, time::Duration};
 
+mod seat;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "koto",
@@ -42,6 +44,12 @@ struct Cli {
     explain: bool,
     #[arg(long)]
     trace: Option<std::path::PathBuf>,
+    /// Stop the persistent nested seat and exit.
+    #[arg(long)]
+    seat_stop: bool,
+    /// Print the persistent nested seat's state and exit.
+    #[arg(long)]
+    seat_status: bool,
     #[arg(long, default_value = "default")]
     session: String,
     #[arg(long, default_value = "default")]
@@ -85,80 +93,6 @@ enum Seat {
     Auto,
 }
 
-struct NestedSeat {
-    child: std::process::Child,
-    previous_signature: Option<std::ffi::OsString>,
-    previous_display: Option<std::ffi::OsString>,
-}
-impl NestedSeat {
-    fn start() -> Result<Self, CoreError> {
-        let signature = format!(
-            "koto-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-        );
-        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
-            .ok_or_else(|| CoreError::Backend("nested seat needs XDG_RUNTIME_DIR".into()))?;
-        let mut child = std::process::Command::new("Hyprland")
-            .arg("--socket")
-            .arg(format!("koto-{signature}"))
-            .env("HYPRLAND_INSTANCE_SIGNATURE", &signature)
-            .env("WLR_BACKENDS", "headless")
-            .env_remove("WAYLAND_DISPLAY")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|error| CoreError::Backend(format!("launch nested Hyprland: {error}")))?;
-        let socket = std::path::PathBuf::from(runtime)
-            .join("hypr")
-            .join(&signature)
-            .join(".socket.sock");
-        let started = std::time::Instant::now();
-        while !socket.exists() {
-            if started.elapsed() > Duration::from_secs(10) {
-                let _ = child.kill();
-                return Err(CoreError::Backend(
-                    "nested Hyprland did not expose its IPC socket".into(),
-                ));
-            }
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|error| CoreError::Backend(error.to_string()))?
-            {
-                return Err(CoreError::Backend(format!(
-                    "nested Hyprland exited early: {status}"
-                )));
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        let previous_signature = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE");
-        let previous_display = std::env::var_os("WAYLAND_DISPLAY");
-        unsafe { std::env::set_var("HYPRLAND_INSTANCE_SIGNATURE", &signature) };
-        unsafe { std::env::set_var("WAYLAND_DISPLAY", format!("koto-{signature}")) };
-        Ok(Self {
-            child,
-            previous_signature,
-            previous_display,
-        })
-    }
-}
-impl Drop for NestedSeat {
-    fn drop(&mut self) {
-        match &self.previous_signature {
-            Some(value) => unsafe { std::env::set_var("HYPRLAND_INSTANCE_SIGNATURE", value) },
-            None => unsafe { std::env::remove_var("HYPRLAND_INSTANCE_SIGNATURE") },
-        }
-        match &self.previous_display {
-            Some(value) => unsafe { std::env::set_var("WAYLAND_DISPLAY", value) },
-            None => unsafe { std::env::remove_var("WAYLAND_DISPLAY") },
-        }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
 struct Runtime {
     hypr: HyprBackend,
     tmux: Tmux,
@@ -406,6 +340,23 @@ fn main() -> ExitCode {
     }
 }
 fn run(cli: Cli) -> Result<i32, CoreError> {
+    // Seat management runs before any program: these manipulate the seat rather
+    // than execute inside one.
+    if cli.seat_stop {
+        let stopped = seat::stop()?;
+        println!("{}", if stopped { "seat stopped" } else { "no seat" });
+        return Ok(0);
+    }
+    if cli.seat_status {
+        match seat::current() {
+            Some(state) => println!(
+                "seat running signature={} display={} pid={}",
+                state.signature, state.display, state.pid
+            ),
+            None => println!("no seat"),
+        }
+        return Ok(0);
+    }
     if cli.instruction.as_slice() == ["abort"] {
         request_abort()?;
         return Ok(0);
@@ -464,11 +415,14 @@ fn run(cli: Cli) -> Result<i32, CoreError> {
             .unwrap_or(Seat::Auto),
     };
     let registers = load_session(&cli.session)?;
-    let _nested = if requested_seat == Seat::Nested {
-        Some(NestedSeat::start()?)
-    } else {
-        None
-    };
+    // Entering a seat only redirects this process (and anything it spawns);
+    // the compositor itself keeps running so later invocations can observe the
+    // windows this one opened.
+    let _restore = seat::Restore::capture();
+    if requested_seat == Seat::Nested {
+        let state = seat::attach_or_start()?;
+        seat::enter(&state);
+    }
     let mut backend = Runtime::default();
     let mut vm = Vm {
         backend: &mut backend,

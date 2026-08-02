@@ -600,6 +600,7 @@ dependencies = [
  "koto-policy",
  "koto-tmux",
  "koto-web",
+ "libc",
  "regex",
  "serde",
  "serde_json",

@@ -14,5 +14,6 @@ koto-policy = { path = "../koto-policy" }
 koto-tmux = { path = "../koto-tmux" }
 koto-web = { path = "../koto-web" }
 regex.workspace = true
+libc = "0.2"
 serde.workspace = true
 serde_json.workspace = true
