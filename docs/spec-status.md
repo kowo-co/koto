@@ -30,7 +30,7 @@ This is a live engineering checklist for `spec.md` v0.1.
 - [x] Hyprland focus/workspace/window/process/list controls and strict selector resolution.
 - [x] Hyprland event-socket idle waits plus window/gone/title/text/exit waits.
 - [x] Dedicated isolated tmux server and pane new/send/run/read/wait/kill operations.
-- [~] Managed Chromium CDP transport over `--remote-debugging-pipe`: attach/launch, goto, click, fill, read, wait, and eval. Attaching an already-running inherited pipe is pending.
+- [x] Managed Chromium CDP transport over `--remote-debugging-pipe`: attach/launch, goto, click, fill, read, wait, eval, and inherited-fd attachment.
 
 ## Observation
 

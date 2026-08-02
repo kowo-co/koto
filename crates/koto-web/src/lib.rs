@@ -10,7 +10,7 @@ use std::{
 };
 
 pub struct Cdp {
-    _child: Child,
+    _child: Option<Child>,
     write: UnixStream,
     read: BufReader<UnixStream>,
     next: u64,
@@ -53,7 +53,7 @@ impl Cdp {
             .set_read_timeout(Some(Duration::from_secs(10)))
             .map_err(ioerr)?;
         let mut cdp = Self {
-            _child: child,
+            _child: Some(child),
             write: parent_write,
             read: BufReader::new(parent_read),
             next: 1,
@@ -68,9 +68,53 @@ impl Cdp {
             .as_str()
             .ok_or_else(|| CoreError::Backend("CDP did not attach to target".into()))?
             .to_owned();
-        let session = cdp.session.clone();
-        cdp.request("Page.enable", json!({}), Some(&session))?;
-        Ok(cdp)
+        cdp.enable_page()
+    }
+    /// Attaches a live browser whose parent passed read/write pipe ends as
+    /// fd 3 and fd 4, as Chromium specifies for `--remote-debugging-pipe`.
+    pub unsafe fn attach_inherited() -> Result<Self, CoreError> {
+        unsafe { Self::attach_pipe(3, 4) }
+    }
+    /// Attaches explicit inherited pipe descriptors without taking ownership
+    /// until a connection has been established.
+    pub unsafe fn attach_pipe(read_fd: i32, write_fd: i32) -> Result<Self, CoreError> {
+        use std::os::fd::FromRawFd;
+        let read = unsafe { UnixStream::from_raw_fd(read_fd) };
+        let write = unsafe { UnixStream::from_raw_fd(write_fd) };
+        read.set_read_timeout(Some(Duration::from_secs(10)))
+            .map_err(ioerr)?;
+        let mut cdp = Self {
+            _child: None,
+            write,
+            read: BufReader::new(read),
+            next: 1,
+            session: String::new(),
+        };
+        let targets = cdp.request("Target.getTargets", json!({}), None)?["result"]["targetInfos"]
+            .as_array()
+            .ok_or_else(|| CoreError::Backend("CDP returned no targets".into()))?
+            .clone();
+        let target = targets
+            .iter()
+            .find_map(|target| {
+                (target["type"].as_str() == Some("page")).then(|| target["targetId"].as_str())
+            })
+            .flatten()
+            .ok_or_else(|| CoreError::Backend("CDP has no page target".into()))?;
+        cdp.session = cdp.request(
+            "Target.attachToTarget",
+            json!({"targetId":target,"flatten":true}),
+            None,
+        )?["result"]["sessionId"]
+            .as_str()
+            .ok_or_else(|| CoreError::Backend("CDP did not attach to target".into()))?
+            .to_owned();
+        cdp.enable_page()
+    }
+    fn enable_page(mut self) -> Result<Self, CoreError> {
+        let session = self.session.clone();
+        self.request("Page.enable", json!({}), Some(&session))?;
+        Ok(self)
     }
     pub fn action(
         &mut self,

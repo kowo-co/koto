@@ -192,7 +192,21 @@ impl Backend for Runtime {
         timeout: Duration,
     ) -> Result<Option<String>, CoreError> {
         if action == "attach" {
-            self.web = Some(koto_web::Cdp::launch(args.first().map(String::as_str))?);
+            let web = match args {
+                [target]
+                    if target.starts_with("pid=")
+                        || target.starts_with("title")
+                        || target.starts_with("class") =>
+                unsafe { koto_web::Cdp::attach_inherited()? },
+                [browser] => koto_web::Cdp::launch(Some(browser))?,
+                [] => koto_web::Cdp::launch(None)?,
+                _ => {
+                    return Err(CoreError::Parse(
+                        "web attach accepts at most one target".into(),
+                    ));
+                }
+            };
+            self.web = Some(web);
             return Ok(None);
         }
         self.web
