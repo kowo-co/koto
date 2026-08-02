@@ -8,6 +8,9 @@
 use koto_core::{Backend, CoreError, Observation, ObserveMode, Selector, SelectorOperator, Wait};
 use serde::{Deserialize, Serialize};
 use std::{
+    io::{ErrorKind, Read},
+    os::unix::net::UnixStream,
+    path::PathBuf,
     process::Command,
     thread,
     time::{Duration, Instant},
@@ -51,9 +54,9 @@ impl HyprBackend {
         serde_json::from_str(&output)
             .map_err(|e| CoreError::Backend(format!("invalid hyprctl clients JSON: {e}")))
     }
-    pub fn resolve(&self, raw: &str) -> Result<Window, CoreError> {
+    fn resolve_all(&self, raw: &str) -> Result<Vec<Window>, CoreError> {
         let selector = Selector::parse(raw).map_err(CoreError::Backend)?;
-        let matches: Vec<_> = self
+        Ok(self
             .windows()?
             .into_iter()
             .filter(|window| {
@@ -71,7 +74,10 @@ impl HyprBackend {
                     _ => false,
                 })
             })
-            .collect();
+            .collect())
+    }
+    pub fn resolve(&self, raw: &str) -> Result<Window, CoreError> {
+        let matches = self.resolve_all(raw)?;
         match matches.len() {
             0 => Err(CoreError::SelectorNotFound(raw.into())),
             1 => Ok(matches.into_iter().next().unwrap()),
@@ -80,6 +86,47 @@ impl HyprBackend {
     }
     fn dispatch(&self, command: &str) -> Result<(), CoreError> {
         hyprctl(["dispatch", command]).map(|_| ())
+    }
+    fn event_socket() -> Result<UnixStream, CoreError> {
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+            .ok_or_else(|| CoreError::Backend("XDG_RUNTIME_DIR is unset".into()))?;
+        let signature = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")
+            .ok_or_else(|| CoreError::Backend("HYPRLAND_INSTANCE_SIGNATURE is unset".into()))?;
+        UnixStream::connect(
+            PathBuf::from(runtime)
+                .join("hypr")
+                .join(signature)
+                .join(".socket2.sock"),
+        )
+        .map_err(|error| CoreError::Backend(format!("Hyprland event socket unavailable: {error}")))
+    }
+    fn wait_idle(&self, quiet: Duration, timeout: Duration) -> Result<(), CoreError> {
+        let mut socket = Self::event_socket()?;
+        let started = Instant::now();
+        loop {
+            if started.elapsed() >= timeout {
+                return Err(CoreError::Timeout("wait idle".into()));
+            }
+            let remaining = timeout.saturating_sub(started.elapsed());
+            socket
+                .set_read_timeout(Some(quiet.min(remaining)))
+                .map_err(|error| CoreError::Backend(error.to_string()))?;
+            let mut byte = [0_u8; 1];
+            match socket.read(&mut byte) {
+                Ok(0) => return Err(CoreError::Backend("Hyprland event socket closed".into())),
+                Ok(_) => continue,
+                Err(error)
+                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
+                {
+                    return Ok(());
+                }
+                Err(error) => {
+                    return Err(CoreError::Backend(format!(
+                        "Hyprland event socket: {error}"
+                    )));
+                }
+            }
+        }
     }
 }
 fn compare(actual: &str, term: &koto_core::SelectorTerm) -> bool {
@@ -165,10 +212,31 @@ impl Backend for HyprBackend {
                 Ok(_) => Err(CoreError::Backend("window still exists".into())),
                 Err(e) => Err(e),
             }),
-            "idle" => {
-                thread::sleep(parse_duration(&wait.value)?);
-                Ok(())
-            }
+            "title" => poll(timeout, || {
+                let pattern = regex::Regex::new(&wait.value)
+                    .map_err(|error| CoreError::Parse(format!("invalid title regex: {error}")))?;
+                if self
+                    .windows()?
+                    .iter()
+                    .any(|window| pattern.is_match(&window.title))
+                {
+                    Ok(())
+                } else {
+                    Err(CoreError::SelectorNotFound(format!("title~{}", wait.value)))
+                }
+            }),
+            "exit" => poll(timeout, || {
+                let pid = wait
+                    .value
+                    .parse::<u32>()
+                    .map_err(|_| CoreError::Parse("wait exit needs a PID".into()))?;
+                if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                    Ok(())
+                } else {
+                    Err(CoreError::Backend(format!("pid {pid} is still running")))
+                }
+            }),
+            "idle" => self.wait_idle(parse_duration(&wait.value)?, timeout),
             _ => Err(CoreError::Unsupported(format!("wait {}", wait.kind))),
         }
     }
@@ -211,8 +279,14 @@ impl Backend for HyprBackend {
             ),
             "close" => match args.first() {
                 Some(selector) => {
-                    let window = self.resolve(selector)?;
-                    format!("closewindow address:{}", window.address)
+                    let windows = self.resolve_all(selector)?;
+                    if windows.is_empty() {
+                        return Err(CoreError::SelectorNotFound(selector.clone()));
+                    }
+                    for window in windows {
+                        self.dispatch(&format!("closewindow address:{}", window.address))?;
+                    }
+                    return Ok(());
                 }
                 None => "killactive".into(),
             },
@@ -238,6 +312,47 @@ impl Backend for HyprBackend {
             _ => return Err(CoreError::Unsupported(format!("window {action}"))),
         };
         self.dispatch(&command)
+    }
+    fn kill(&mut self, selector: &str) -> Result<(), CoreError> {
+        if let Some(scope) = selector.strip_prefix("scope=") {
+            let status = Command::new("systemctl")
+                .args(["--user", "kill", scope])
+                .status()
+                .map_err(|error| CoreError::Backend(format!("systemctl unavailable: {error}")))?;
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(CoreError::Backend(format!("could not kill scope {scope}")))
+            };
+        }
+        let windows = self.resolve_all(selector)?;
+        if windows.is_empty() {
+            return Err(CoreError::SelectorNotFound(selector.into()));
+        }
+        for window in windows {
+            let status = Command::new("kill")
+                .args(["-TERM", &window.pid.to_string()])
+                .status()
+                .map_err(|error| CoreError::Backend(format!("kill unavailable: {error}")))?;
+            if !status.success() {
+                return Err(CoreError::Backend(format!(
+                    "could not kill pid {}",
+                    window.pid
+                )));
+            }
+        }
+        Ok(())
+    }
+    fn metadata(&mut self, field: &str) -> Result<String, CoreError> {
+        let window = self.resolve("focused")?;
+        match field {
+            "title" => Ok(window.title),
+            "class" => Ok(window.class),
+            "addr" => Ok(window.address),
+            "pid" => Ok(window.pid.to_string()),
+            "ws" => Ok(window.workspace.id.to_string()),
+            _ => Err(CoreError::Unsupported(format!("peek {field}"))),
+        }
     }
     fn spawn(&mut self, command: &[String]) -> Result<String, CoreError> {
         if command.is_empty() {

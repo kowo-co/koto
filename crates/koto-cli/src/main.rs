@@ -167,6 +167,12 @@ impl Backend for Runtime {
     fn spawn(&mut self, command: &[String]) -> Result<String, CoreError> {
         self.hypr.spawn(command)
     }
+    fn kill(&mut self, selector: &str) -> Result<(), CoreError> {
+        self.hypr.kill(selector)
+    }
+    fn metadata(&mut self, field: &str) -> Result<String, CoreError> {
+        self.hypr.metadata(field)
+    }
     fn window(&mut self, action: &str, args: &[String]) -> Result<(), CoreError> {
         self.hypr.window(action, args)
     }
@@ -174,28 +180,29 @@ impl Backend for Runtime {
 
 fn main() -> ExitCode {
     match run(Cli::parse()) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => ExitCode::from(code.clamp(0, 255) as u8),
         Err(error) => {
             eprintln!("#koto error exit={} reason={}", exit_code(&error), error);
             ExitCode::from(exit_code(&error) as u8)
         }
     }
 }
-fn run(cli: Cli) -> Result<(), CoreError> {
+fn run(cli: Cli) -> Result<i32, CoreError> {
     if cli.instruction.len() == 2 && cli.instruction[0] == "stdlib" && cli.instruction[1] == "sync"
     {
-        return sync_stdlib();
+        sync_stdlib()?;
+        return Ok(0);
     }
     let mut program = load_program(&cli)?;
     apply_observe_policy(&mut program, cli.observe.into());
     if cli.explain {
         print_program(&program, cli.format);
-        return Ok(());
+        return Ok(0);
     }
     if cli.dry_run {
         resolve_dry_run(&program)?;
         print_plan(&program, cli.format);
-        return Ok(());
+        return Ok(0);
     }
     let (policy, profile) = Policy::load(&default_path(), &cli.profile)?;
     let capabilities = policy.effective(
@@ -235,7 +242,7 @@ fn run(cli: Cli) -> Result<(), CoreError> {
         append_trace(&path, &execution)?;
     }
     print_execution(&execution, cli.format, cli.seat);
-    Ok(())
+    Ok(execution.registers.status)
 }
 fn sync_stdlib() -> Result<(), CoreError> {
     let config = std::env::var_os("HOME")

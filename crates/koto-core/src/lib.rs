@@ -754,6 +754,9 @@ pub trait Backend {
     fn spawn(&mut self, _command: &[String]) -> Result<String, CoreError> {
         Err(CoreError::Unsupported("spawn".into()))
     }
+    fn kill(&mut self, _selector: &str) -> Result<(), CoreError> {
+        Err(CoreError::Unsupported("kill".into()))
+    }
     fn window(&mut self, _action: &str, _args: &[String]) -> Result<(), CoreError> {
         Err(CoreError::Unsupported("window operation".into()))
     }
@@ -969,6 +972,7 @@ impl<'a, B: Backend> Vm<'a, B> {
                 Op::Expect(predicate) if result.is_ok() => {
                     i32::from(!self.predicate(predicate, &execution.registers))
                 }
+                Op::Halt(code) if result.is_ok() => *code,
                 _ if result.is_ok() => 0,
                 _ => 1,
             };
@@ -980,7 +984,11 @@ impl<'a, B: Backend> Vm<'a, B> {
                 status,
                 warning:
                     matches!(&instruction.op, Op::Wait(Wait { kind, .. }) if kind == "duration")
-                        .then(|| "raw sleep is discouraged".into()),
+                        .then(|| "raw sleep is discouraged".into())
+                        .or_else(|| {
+                            matches!(&instruction.op, Op::Click(_) | Op::Scroll { .. })
+                                .then(|| "pointer instruction used".into())
+                        }),
             });
             operations += 1;
             result?;
@@ -1086,6 +1094,10 @@ impl<'a, B: Backend> Vm<'a, B> {
                 execution.registers.out = self.backend.spawn(command)?;
                 Ok(())
             }
+            Op::Kill(selector) => {
+                self.require("spawn")?;
+                self.backend.kill(selector)
+            }
             Op::Workspace(workspace) => {
                 self.require("window")?;
                 self.backend.window("ws", std::slice::from_ref(workspace))
@@ -1141,6 +1153,21 @@ impl<'a, B: Backend> Vm<'a, B> {
                 }
                 Ok(())
             }
+            Op::Budget { kind, value } => match kind.as_str() {
+                "ops" => {
+                    let value = value
+                        .parse::<u32>()
+                        .map_err(|_| CoreError::Parse("budget ops needs an integer".into()))?;
+                    self.op_budget = self.op_budget.min(value);
+                    Ok(())
+                }
+                "time" => {
+                    let value = parse_duration(value)?;
+                    self.time_budget = self.time_budget.min(value);
+                    Ok(())
+                }
+                _ => Err(CoreError::Parse(format!("unknown budget {kind}"))),
+            },
             Op::Nop | Op::Label(_) | Op::BlockEnd | Op::EndDef => Ok(()),
             Op::Halt(code) => {
                 execution.registers.status = *code;
@@ -1203,6 +1230,23 @@ impl<'a, B: Backend> Vm<'a, B> {
             Err(CoreError::Capability(cap.into()))
         }
     }
+}
+fn parse_duration(value: &str) -> Result<Duration, CoreError> {
+    let (number, multiplier) = if let Some(number) = value.strip_suffix("ms") {
+        (number, 1_u64)
+    } else if let Some(number) = value.strip_suffix('s') {
+        (number, 1_000)
+    } else if let Some(number) = value.strip_suffix('m') {
+        (number, 60_000)
+    } else {
+        return Err(CoreError::Parse(format!("invalid duration `{value}`")));
+    };
+    number
+        .parse::<u64>()
+        .ok()
+        .and_then(|number| number.checked_mul(multiplier))
+        .map(Duration::from_millis)
+        .ok_or_else(|| CoreError::Parse(format!("invalid duration `{value}`")))
 }
 fn op_name(op: &Op) -> &'static str {
     match op {
