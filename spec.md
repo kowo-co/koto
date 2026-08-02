@@ -191,19 +191,31 @@ This is the highest-value layer on Omarchy. Neovim, lazygit, btop, and every cod
 
 ### 4.9 Web
 
-Speaks CDP over `--remote-debugging-pipe`, either to a betterwright-managed browser or to an attached session (§11).
+Two engines: CDP over `--remote-debugging-pipe`, to a koto-launched browser or an attached session (§11), and BetterWright behind `web attach bw`.
 
 ```
 web attach <target>         ; requires cap: web
+web attach bw [profile=<p>] [session=<s>]   ; BetterWright engine, alias `betterwright`
 web goto  <url>
 web click <css|text=>
 web fill  <css> "<text>"
-web read  [css]             ; accessibility tree by default, not innerText
+web read  [css|full]        ; accessibility tree by default, not innerText
 web wait  <css|url~>
 web eval  "<js>"            ; requires cap: web.eval
+web shot  [name]            ; page screenshot into the observation dir, path in $out
+web login <host> [user=<name>]        ; requires cap: web.login
+web download <url|target> [to=<dir>]  ; requires cap: web.download
 ```
 
-`web read` returns the CDP accessibility snapshot, which is structurally closer to what a screen reader sees than to raw DOM, and is much cheaper in tokens.
+`web read` returns the CDP accessibility snapshot, which is structurally closer to what a screen reader sees than to raw DOM, and is much cheaper in tokens. On the `bw` engine it returns a pruned snapshot carrying `[ref=eN]` handles instead; `full` drops the diff against the previous read and raises the character cap, which is bigger and rarely what you want.
+
+`click`, `fill`, and `wait` take a `[ref=eN]` handle from the last `web read`, a `text=` match, or CSS. Refs go stale the moment the page changes: read again rather than guessing.
+
+`web shot` is `bw` only and captures the page itself, so it works on an occluded window. `web login` fills a vaulted credential — the secret never enters the script. `web download` writes the retrieved file path to `$out`.
+
+Managed CDP launches drive the user's `google-chrome-stable`, falling back to `chromium`, against a persistent koto-owned data dir at `$XDG_STATE_HOME/koto/chrome`. Chrome 136 and later refuse a debugging pipe on the default profile, so this is not a preference: sign into the koto profile once and Chrome Sync carries the identity forward. The daily profile is never driven.
+
+The `betterwright` engine is a runtime-optional dependency: node 22 or newer plus `npm i -g betterwright`, or `KOTO_BETTERWRIGHT_DIR` pointing at an install. Absent, `web attach bw` exits 9 at attach, never at parse.
 
 ### 4.10 Control flow
 
@@ -448,8 +460,10 @@ Ship order: Arch/Hyprland, then Debian family, then macOS if there is demand, th
 | `window` | focus, ws, close, move, float |
 | `spawn` | spawn |
 | `exec` | pane run, anything reaching a shell |
-| `web` | web attach, goto, click, fill, read |
+| `web` | web attach, goto, click, fill, read, shot |
 | `web.eval` | web eval |
+| `web.login` | web login |
+| `web.download` | web download |
 | `fs` | checkpoint, rollback |
 | `takeover` | lease acquisition (§11) |
 
@@ -464,6 +478,10 @@ deny  = ["web.eval"]
 allow = ["input", "window", "spawn", "exec", "web", "fs"]
 budget_ops = 512
 seat = "nested"
+
+[profile.browse]
+allow = ["web", "web.login"]
+deny  = ["web.eval", "web.download"]
 ```
 
 ### 9.2 Kill switch

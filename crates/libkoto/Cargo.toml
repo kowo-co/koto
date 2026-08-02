@@ -12,3 +12,5 @@ koto-core = { path = "../koto-core" }
 koto-hypr = { path = "../koto-hypr" }
 koto-observe = { path = "../koto-observe" }
 koto-tmux = { path = "../koto-tmux" }
+koto-web = { path = "../koto-web" }
+serde_json.workspace = true

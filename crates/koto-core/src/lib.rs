@@ -1100,10 +1100,11 @@ impl<'a, B: Backend> Vm<'a, B> {
                 Ok(())
             }
             Op::Web { action, args } => {
-                if action == "eval" {
-                    self.require("web.eval")?;
-                } else {
-                    self.require("web")?;
+                match action.as_str() {
+                    "eval" => self.require("web.eval")?,
+                    "login" => self.require("web.login")?,
+                    "download" => self.require("web.download")?,
+                    _ => self.require("web")?,
                 }
                 if let Some(output) = self.backend.web(action, args, self.default_timeout)? {
                     execution.registers.out = output;
@@ -1500,9 +1501,13 @@ mod tests {
         assert_eq!(selector.terms.len(), 2);
         assert_eq!(selector.terms[1].value, "Basecamp");
     }
-    struct Null;
+    #[derive(Default)]
+    struct Null {
+        keys: usize,
+    }
     impl Backend for Null {
         fn key(&mut self, _: &[String]) -> Result<(), CoreError> {
+            self.keys += 1;
             Ok(())
         }
         fn text(&mut self, _: &str, _: bool) -> Result<(), CoreError> {
@@ -1527,9 +1532,12 @@ mod tests {
         }
     }
     fn vm(backend: &mut Null) -> Vm<'_, Null> {
+        vm_caps(backend, &[])
+    }
+    fn vm_caps<'a>(backend: &'a mut Null, caps: &[&str]) -> Vm<'a, Null> {
         Vm {
             backend,
-            capabilities: BTreeSet::new(),
+            capabilities: caps.iter().map(|c| (*c).to_owned()).collect(),
             op_budget: 32,
             time_budget: Duration::from_secs(1),
             default_timeout: Duration::from_secs(1),
@@ -1541,7 +1549,7 @@ mod tests {
     #[test]
     fn repetitions_execute_a_bounded_body() {
         let program = parse_script("rep 3 {\nnop\n}\nend silent\n").unwrap();
-        let execution = vm(&mut Null).run(&program).unwrap();
+        let execution = vm(&mut Null::default()).run(&program).unwrap();
         assert!(execution.halted);
         assert_eq!(
             execution
@@ -1555,7 +1563,7 @@ mod tests {
     #[test]
     fn definitions_are_skipped_until_called() {
         let program = parse_script("def f()\nnop\nenddef\ncall f\nend silent\n").unwrap();
-        let execution = vm(&mut Null).run(&program).unwrap();
+        let execution = vm(&mut Null::default()).run(&program).unwrap();
         assert!(execution.halted);
         assert_eq!(
             execution
@@ -1565,5 +1573,31 @@ mod tests {
                 .count(),
             1
         );
+    }
+    #[test]
+    fn web_login_needs_its_own_capability() {
+        let program = parse_script("web login example.com\n").unwrap();
+        let error = vm_caps(&mut Null::default(), &["web"])
+            .run(&program)
+            .unwrap_err();
+        assert!(matches!(error, CoreError::Capability(cap) if cap == "web.login"));
+    }
+    #[test]
+    fn require_web_login_fails_before_instruction_zero() {
+        let program = parse_script("require web.login\nkey a\n").unwrap();
+        let mut backend = Null::default();
+        let mut machine = vm_caps(&mut backend, &["web", "input"]);
+        let error = machine.run(&program).unwrap_err();
+        assert!(matches!(error, CoreError::Capability(cap) if cap == "web.login"));
+        assert!(machine.last_trace.is_empty());
+        assert_eq!(backend.keys, 0);
+    }
+    #[test]
+    fn web_download_needs_its_own_capability() {
+        let program = parse_script("web download x\n").unwrap();
+        let error = vm_caps(&mut Null::default(), &["web"])
+            .run(&program)
+            .unwrap_err();
+        assert!(matches!(error, CoreError::Capability(cap) if cap == "web.download"));
     }
 }

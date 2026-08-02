@@ -12,7 +12,7 @@ platform facility is unavailable, but it must not silently ignore one.
 | Window | `focus`, `ws`, `send ws`, `close`, `float`, `tile`, `full`, `pin`, `swap`, `move`, `monitor`, `list` | Window selectors are strict. |
 | Process | `spawn`, `kill` | `spawn` accepts a command vector; `kill` accepts a selector or scope. |
 | Terminal | `pane new/send/run/read/wait/kill` | Managed tmux control-mode panes. |
-| Web | `web attach/goto/click/fill/read/wait/eval` | CDP operations. |
+| Web | `web attach/goto/click/fill/read/wait/eval/shot/login/download` | Raw CDP or the BetterWright engine; `web attach bw` selects the latter. |
 | Flow | labels, `jmp`, `jz`, `jnz`, `je`, `rep`, `while`, `call`, `ret`, `def`, `enddef`, `include` | `while` **must** include `max <n>`. |
 | Guards | `require`, `assert`, `expect`, `budget`, `checkpoint`, `rollback` | `require` validates before instruction zero. |
 | Meta | `note`, `nop`, `halt` | `halt [code]` exits without implicit observation. |

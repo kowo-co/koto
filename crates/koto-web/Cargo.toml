@@ -7,4 +7,5 @@ license.workspace = true
 [dependencies]
 koto-core = { path = "../koto-core" }
 libc = "0.2"
+regex.workspace = true
 serde_json.workspace = true

@@ -1,192 +1,155 @@
-//! Minimal managed Chromium CDP transport over `--remote-debugging-pipe`.
-use koto_core::CoreError;
-use serde_json::{Value, json};
-use std::{
-    io::{BufRead, BufReader, Write},
-    os::fd::AsRawFd,
-    os::unix::{net::UnixStream, process::CommandExt},
-    process::{Child, Command, Stdio},
-    time::{Duration, Instant},
-};
+//! Browser rung: a CDP engine over `--remote-debugging-pipe` and a BetterWright
+//! engine driven through a node sidecar.
+mod bw;
+mod cdp;
 
-pub struct Cdp {
-    _child: Option<Child>,
-    write: UnixStream,
-    read: BufReader<UnixStream>,
-    next: u64,
-    session: String,
+pub use bw::{BwWorker, map_bw_error};
+pub use cdp::Cdp;
+
+use koto_core::CoreError;
+use std::{path::PathBuf, sync::LazyLock, time::Duration};
+
+pub enum WebEngine {
+    Cdp(Cdp),
+    Bw(BwWorker),
 }
-impl Cdp {
-    pub fn launch(browser: Option<&str>) -> Result<Self, CoreError> {
-        let (parent_write, child_read) = UnixStream::pair().map_err(ioerr)?;
-        let (child_write, parent_read) = UnixStream::pair().map_err(ioerr)?;
-        let read_fd = child_read.as_raw_fd();
-        let write_fd = child_write.as_raw_fd();
-        let browser = browser
-            .filter(|value| !value.is_empty())
-            .unwrap_or("chromium");
-        let mut command = Command::new(browser);
-        command
-            .args([
-                "--remote-debugging-pipe",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "about:blank",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        unsafe {
-            command.pre_exec(move || {
-                if libc::dup2(read_fd, 3) < 0 || libc::dup2(write_fd, 4) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttachSpec {
+    LaunchDefault,
+    LaunchBrowser(String),
+    InheritedPipe(String),
+    Bw {
+        profile: Option<String>,
+        session: Option<String>,
+    },
+}
+
+static BW_KV: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"^(profile|session)=(.+)$").unwrap());
+
+pub fn parse_attach(args: &[String]) -> Result<AttachSpec, CoreError> {
+    let Some(first) = args.first() else {
+        return Ok(AttachSpec::LaunchDefault);
+    };
+    if first == "bw" || first == "betterwright" {
+        let (mut profile, mut session) = (None, None);
+        for arg in &args[1..] {
+            let caps = BW_KV.captures(arg).ok_or_else(|| {
+                CoreError::Parse(format!(
+                    "web attach bw: expected profile=<p> or session=<s>, got `{arg}`"
+                ))
+            })?;
+            let value = caps[2].to_owned();
+            if &caps[1] == "profile" {
+                profile = Some(value);
+            } else {
+                session = Some(value);
+            }
         }
-        let child = command
-            .spawn()
-            .map_err(|error| CoreError::Backend(format!("launch {browser}: {error}")))?;
-        drop(child_read);
-        drop(child_write);
-        parent_read
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .map_err(ioerr)?;
-        let mut cdp = Self {
-            _child: Some(child),
-            write: parent_write,
-            read: BufReader::new(parent_read),
-            next: 1,
-            session: String::new(),
-        };
-        let target = cdp.request("Target.createTarget", json!({"url":"about:blank"}), None)?["result"]["targetId"].as_str().ok_or_else(|| CoreError::Backend("CDP did not create a target".into()))?.to_owned();
-        cdp.session = cdp.request(
-            "Target.attachToTarget",
-            json!({"targetId":target,"flatten":true}),
-            None,
-        )?["result"]["sessionId"]
-            .as_str()
-            .ok_or_else(|| CoreError::Backend("CDP did not attach to target".into()))?
-            .to_owned();
-        cdp.enable_page()
+        return Ok(AttachSpec::Bw { profile, session });
     }
-    /// Attaches a live browser whose parent passed read/write pipe ends as
-    /// fd 3 and fd 4, as Chromium specifies for `--remote-debugging-pipe`.
-    pub unsafe fn attach_inherited() -> Result<Self, CoreError> {
-        unsafe { Self::attach_pipe(3, 4) }
+    if args.len() > 1 {
+        return Err(CoreError::Parse(
+            "web attach accepts at most one target".into(),
+        ));
     }
-    /// Attaches explicit inherited pipe descriptors without taking ownership
-    /// until a connection has been established.
-    pub unsafe fn attach_pipe(read_fd: i32, write_fd: i32) -> Result<Self, CoreError> {
-        use std::os::fd::FromRawFd;
-        let read = unsafe { UnixStream::from_raw_fd(read_fd) };
-        let write = unsafe { UnixStream::from_raw_fd(write_fd) };
-        read.set_read_timeout(Some(Duration::from_secs(10)))
-            .map_err(ioerr)?;
-        let mut cdp = Self {
-            _child: None,
-            write,
-            read: BufReader::new(read),
-            next: 1,
-            session: String::new(),
-        };
-        let targets = cdp.request("Target.getTargets", json!({}), None)?["result"]["targetInfos"]
-            .as_array()
-            .ok_or_else(|| CoreError::Backend("CDP returned no targets".into()))?
-            .clone();
-        let target = targets
-            .iter()
-            .find_map(|target| {
-                (target["type"].as_str() == Some("page")).then(|| target["targetId"].as_str())
-            })
-            .flatten()
-            .ok_or_else(|| CoreError::Backend("CDP has no page target".into()))?;
-        cdp.session = cdp.request(
-            "Target.attachToTarget",
-            json!({"targetId":target,"flatten":true}),
-            None,
-        )?["result"]["sessionId"]
-            .as_str()
-            .ok_or_else(|| CoreError::Backend("CDP did not attach to target".into()))?
-            .to_owned();
-        cdp.enable_page()
+    if first.starts_with("pid=") || first.starts_with("title") || first.starts_with("class") {
+        Ok(AttachSpec::InheritedPipe(first.clone()))
+    } else {
+        Ok(AttachSpec::LaunchBrowser(first.clone()))
     }
-    fn enable_page(mut self) -> Result<Self, CoreError> {
-        let session = self.session.clone();
-        self.request("Page.enable", json!({}), Some(&session))?;
-        Ok(self)
-    }
+}
+
+pub fn attach(spec: AttachSpec) -> Result<WebEngine, CoreError> {
+    Ok(match spec {
+        AttachSpec::LaunchDefault => WebEngine::Cdp(Cdp::launch(None)?),
+        AttachSpec::LaunchBrowser(browser) => WebEngine::Cdp(Cdp::launch(Some(&browser))?),
+        AttachSpec::InheritedPipe(selector) => {
+            WebEngine::Cdp(Cdp::attach_inherited(Some(&selector))?)
+        }
+        AttachSpec::Bw { profile, session } => {
+            WebEngine::Bw(BwWorker::spawn(profile.as_deref(), session.as_deref())?)
+        }
+    })
+}
+
+impl WebEngine {
     pub fn action(
         &mut self,
         action: &str,
         args: &[String],
         timeout: Duration,
     ) -> Result<Option<String>, CoreError> {
-        match action {
-            "goto" => { self.call("Page.navigate", json!({"url": need(args, "web goto")?}))?; Ok(None) }
-            "read" => Ok(Some(self.call("Accessibility.getFullAXTree", json!({"depth": -1}))?.to_string())),
-            "eval" => Ok(Some(self.call("Runtime.evaluate", json!({"expression":need(args,"web eval")?,"returnByValue":true,"awaitPromise":true}))?["result"]["result"]["value"].to_string())),
-            "click" => { let selector = need(args,"web click")?; self.evaluate(&format!("document.querySelector({selector:?})?.click()"))?; Ok(None) }
-            "fill" => { let selector = need(args,"web fill")?; let value = args.get(1).ok_or_else(|| CoreError::Parse("web fill needs text".into()))?; self.evaluate(&format!("(()=>{{const e=document.querySelector({selector:?});if(!e)throw Error('selector not found');e.value={value:?};e.dispatchEvent(new Event('input',{{bubbles:true}}));}})()"))?; Ok(None) }
-            "wait" => { let selector = need(args,"web wait")?; let start=Instant::now(); while start.elapsed()<timeout { if self.evaluate(&format!("!!document.querySelector({selector:?})"))? == "true" { return Ok(None); } std::thread::sleep(Duration::from_millis(50)); } Err(CoreError::Timeout(format!("web wait {selector}"))) }
-            _ => Err(CoreError::Parse(format!("unknown web action `{action}`"))),
+        match self {
+            Self::Cdp(cdp) => match action {
+                "shot" | "login" | "download" => Err(needs_bw(action)),
+                _ => cdp.action(action, args, timeout),
+            },
+            Self::Bw(worker) => worker.action(action, args, timeout),
         }
     }
-    fn evaluate(&mut self, expression: &str) -> Result<String, CoreError> {
-        Ok(self.call(
-            "Runtime.evaluate",
-            json!({"expression":expression,"returnByValue":true,"awaitPromise":true}),
-        )?["result"]["result"]["value"]
-            .to_string())
+    pub fn is_bw(&self) -> bool {
+        matches!(self, Self::Bw(_))
     }
-    fn call(&mut self, method: &str, params: Value) -> Result<Value, CoreError> {
-        let session = self.session.clone();
-        self.request(method, params, Some(&session))
-    }
-    fn request(
-        &mut self,
-        method: &str,
-        params: Value,
-        session: Option<&str>,
-    ) -> Result<Value, CoreError> {
-        let id = self.next;
-        self.next += 1;
-        let mut message = json!({"id":id,"method":method,"params":params});
-        if let Some(session) = session {
-            message["sessionId"] = Value::String(session.into());
-        }
-        serde_json::to_writer(&mut self.write, &message)
-            .map_err(|error| CoreError::Backend(error.to_string()))?;
-        self.write.write_all(&[0]).map_err(ioerr)?;
-        self.write.flush().map_err(ioerr)?;
-        loop {
-            let mut line = Vec::new();
-            self.read.read_until(0, &mut line).map_err(|error| {
-                if error.kind() == std::io::ErrorKind::TimedOut {
-                    CoreError::Timeout(format!("CDP {method}"))
-                } else {
-                    ioerr(error)
-                }
-            })?;
-            if line.last() == Some(&0) {
-                line.pop();
-            }
-            let value: Value = serde_json::from_slice(&line)
-                .map_err(|error| CoreError::Backend(format!("invalid CDP response: {error}")))?;
-            if value["id"].as_u64() == Some(id) {
-                if let Some(error) = value.get("error") {
-                    return Err(CoreError::Backend(format!("CDP {method}: {error}")));
-                }
-                return Ok(value);
-            }
+    pub fn screenshot(&mut self, timeout: Duration) -> Result<PathBuf, CoreError> {
+        match self {
+            Self::Cdp(_) => Err(needs_bw("shot")),
+            Self::Bw(worker) => worker.screenshot(timeout),
         }
     }
 }
-fn need<'a>(args: &'a [String], name: &str) -> Result<&'a str, CoreError> {
-    args.first()
-        .map(String::as_str)
-        .ok_or_else(|| CoreError::Parse(format!("{name} needs an argument")))
+fn needs_bw(action: &str) -> CoreError {
+    CoreError::Unsupported(format!(
+        "web {action} needs the betterwright engine (web attach bw)"
+    ))
 }
-fn ioerr(error: std::io::Error) -> CoreError {
-    CoreError::Backend(format!("CDP pipe: {error}"))
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|value| (*value).to_owned()).collect()
+    }
+    #[test]
+    fn attach_grammar_table() {
+        assert_eq!(parse_attach(&[]).unwrap(), AttachSpec::LaunchDefault);
+        assert_eq!(
+            parse_attach(&args(&["firefox"])).unwrap(),
+            AttachSpec::LaunchBrowser("firefox".into())
+        );
+        assert_eq!(
+            parse_attach(&args(&["title~build"])).unwrap(),
+            AttachSpec::InheritedPipe("title~build".into())
+        );
+        assert_eq!(
+            parse_attach(&args(&["pid=42"])).unwrap(),
+            AttachSpec::InheritedPipe("pid=42".into())
+        );
+        assert_eq!(
+            parse_attach(&args(&["bw"])).unwrap(),
+            AttachSpec::Bw {
+                profile: None,
+                session: None
+            }
+        );
+        assert_eq!(
+            parse_attach(&args(&["betterwright", "profile=work", "session=s1"])).unwrap(),
+            AttachSpec::Bw {
+                profile: Some("work".into()),
+                session: Some("s1".into())
+            }
+        );
+        assert!(matches!(
+            parse_attach(&args(&["bw", "bogus=1"])),
+            Err(CoreError::Parse(_))
+        ));
+        assert!(matches!(
+            parse_attach(&args(&["bw", "profile="])),
+            Err(CoreError::Parse(_))
+        ));
+        assert!(matches!(
+            parse_attach(&args(&["a", "b"])),
+            Err(CoreError::Parse(_))
+        ));
+    }
 }

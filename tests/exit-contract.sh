@@ -38,6 +38,33 @@ check "pane new needs exec"   5 $K --deny exec --allow exec,input --script /tmp/
 check "pane read cannot start a shell" 9 $K --deny exec --allow exec,input pane read 5
 
 echo
+echo "web verbs answer from the gate, not from a browser (none of these attach):"
+# koto's own stdout/stderr must land in a file, never a pipe: `web attach` can
+# spawn a browser or a node sidecar that inherits the descriptor and holds it
+# open long after koto exits. `3>&- 4>&-` is the point of the selector case —
+# with no CDP pipe prepared koto must refuse, not grab whatever it finds there.
+checkw() { # name expected timeout command...
+  local name="$1" expected="$2" secs="$3"; shift 3
+  timeout "$secs" "$@" >/tmp/koto-exit-web.log 2>&1 </dev/null 3>&- 4>&-
+  local got=$?
+  if [[ "$got" == "$expected" ]]; then
+    printf '  ok    %-34s exit=%s\n' "$name" "$got"; pass=$((pass+1))
+  else
+    printf '  FAIL  %-34s expected=%s got=%s\n' "$name" "$expected" "$got"
+    printf '        %s\n' "$(tail -1 /tmp/koto-exit-web.log)"; fail=$((fail+1))
+  fi
+}
+# `web read` would exit 9 on its own; 5 proves require ran before instruction 0.
+printf 'require web.download\nweb read\nend silent\n' > /tmp/koto-web-require.basm
+checkw "web login needs web.login"      5 10 $K --allow web web login example.com
+checkw "require web.download preflight" 5 10 $K --allow web --script /tmp/koto-web-require.basm
+checkw "web shot without an engine"     9 10 $K --allow web web shot
+checkw "web attach selector, no fds"    9 10 $K --allow web web attach 'title~ZZ_NO_SUCH_WINDOW_ZZ'
+# This one boots node to discover the module is missing, so give it room.
+checkw "web attach bw, no betterwright" 9 60 $K --allow web web attach bw
+checkw "web attach bw rejects junk"     8 10 $K --allow web web attach bw bogus=1
+
+echo
 echo "default-capability behaviour (--allow grants, never restricts):"
 check "type is allowed by default"   0 $K --allow window type "" end silent
 

@@ -97,7 +97,7 @@ struct Runtime {
     hypr: HyprBackend,
     tmux: Tmux,
     last_image: Option<std::path::PathBuf>,
-    web: Option<koto_web::Cdp>,
+    web: Option<koto_web::WebEngine>,
 }
 impl Default for Runtime {
     fn default() -> Self {
@@ -162,7 +162,14 @@ impl Backend for Runtime {
     }
     fn observe(&mut self, mode: ObserveMode) -> Result<Observation, CoreError> {
         let image = if matches!(mode, ObserveMode::Image | ObserveMode::Both) {
-            let path = koto_observe::screencopy::capture_png(&observation_image_path())?;
+            let shot = match self.web.as_mut() {
+                Some(engine) if engine.is_bw() => engine.screenshot(Duration::from_secs(10)).ok(),
+                _ => None,
+            };
+            let path = match shot.and_then(|artifact| copy_to_observations(artifact).ok()) {
+                Some(path) => path,
+                None => koto_observe::screencopy::capture_png(&observation_image_path())?,
+            };
             self.last_image = Some(path.clone());
             Some(path.display().to_string())
         } else {
@@ -178,9 +185,10 @@ impl Backend for Runtime {
         }
         if mode != ObserveMode::Image {
             if let Some(web) = self.web.as_mut() {
+                let source = if web.is_bw() { "betterwright" } else { "cdp" };
                 if let Ok(Some(text)) = web.action("read", &[], Duration::from_secs(5)) {
                     return Ok(Observation {
-                        source: "cdp".into(),
+                        source: source.into(),
                         fidelity: "exact, structured".into(),
                         text: Some(text),
                         image,
@@ -224,22 +232,19 @@ impl Backend for Runtime {
         timeout: Duration,
     ) -> Result<Option<String>, CoreError> {
         if action == "attach" {
-            let web = match args {
-                [target]
-                    if target.starts_with("pid=")
-                        || target.starts_with("title")
-                        || target.starts_with("class") =>
-                unsafe { koto_web::Cdp::attach_inherited()? },
-                [browser] => koto_web::Cdp::launch(Some(browser))?,
-                [] => koto_web::Cdp::launch(None)?,
-                _ => {
-                    return Err(CoreError::Parse(
-                        "web attach accepts at most one target".into(),
-                    ));
-                }
-            };
-            self.web = Some(web);
+            self.web = Some(koto_web::attach(koto_web::parse_attach(args)?)?);
             return Ok(None);
+        }
+        if action == "shot" {
+            let engine = self.web.as_mut().ok_or_else(|| {
+                CoreError::Backend("web shot needs an attached engine (web attach bw)".into())
+            })?;
+            let Some(artifact) = engine.action("shot", args, timeout)? else {
+                return Ok(None);
+            };
+            let path = copy_to_observations(artifact)?;
+            self.last_image = Some(path.clone());
+            return Ok(Some(path.display().to_string()));
         }
         self.web
             .as_mut()
@@ -468,6 +473,18 @@ fn observation_image_path() -> std::path::PathBuf {
             .unwrap_or_default()
             .as_millis()
     ))
+}
+fn copy_to_observations(
+    artifact: impl AsRef<std::path::Path>,
+) -> Result<std::path::PathBuf, CoreError> {
+    let path = observation_image_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| CoreError::Backend(format!("web shot: {error}")))?;
+    }
+    std::fs::copy(artifact, &path)
+        .map_err(|error| CoreError::Backend(format!("web shot: {error}")))?;
+    Ok(path)
 }
 fn abort_path() -> std::path::PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")

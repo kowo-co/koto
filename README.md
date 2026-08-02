@@ -24,7 +24,8 @@ koto thinks that's a bad plan.
 **Screenshots are the last resort, not the interface.** koto walks an
 observation ladder — CDP, then the accessibility tree, then tmux's exact
 scrollback, then compositor metadata, then and only then pixels, with OCR at the
-bottom. When your agent asks what's on screen, it gets this:
+bottom. The web rung speaks either raw CDP or BetterWright, whichever you
+attached. When your agent asks what's on screen, it gets this:
 
 ```
 window co.kowo.KotoEvalSettings ws=4 title="Koto Eval Settings"
@@ -106,8 +107,9 @@ Two lexical rules that will bite you exactly once:
 
 ## Capabilities
 
-`input`, `window`, `spawn`, `exec`, `web`, `web.eval`, `pointer`, `fs` —
-configured in `~/.config/koto/policy.toml`, overridable per invocation.
+`input`, `window`, `spawn`, `exec`, `web`, `web.eval`, `web.login`,
+`web.download`, `pointer`, `fs` — configured in
+`~/.config/koto/policy.toml`, overridable per invocation.
 **Deny always wins.** `require` at the top of a script validates before
 instruction zero, so a policy violation fails immediately instead of halfway
 through a mutation.
@@ -162,7 +164,7 @@ Effects, not return values. Return values lie.
 | `koto-input` | Wayland virtual keyboard and pointer |
 | `koto-observe` | the observation ladder |
 | `koto-policy` | capabilities, deny-wins resolution |
-| `koto-web` | Chromium over `--remote-debugging-pipe` |
+| `koto-web` | Chromium over `--remote-debugging-pipe`; BetterWright over a node sidecar |
 | `koto` | CLI, output formats, exit codes |
 | `libkoto` | C ABI — see [`include/koto.h`](include/koto.h) |
 
@@ -180,9 +182,10 @@ a machine unusable and we'd like you to keep using yours.
 v0.1. We'd rather tell you than have you find out.
 
 **Works:** basm end to end, Wayland virtual keyboard and pointer, Hyprland state
-and events, tmux control-mode panes, Chromium over CDP, the AT-SPI rung, wlroots
-screencopy, OCR via Tesseract, capabilities, budgets, btrfs checkpoints, and the
-C ABI.
+and events, tmux control-mode panes, Chromium over CDP, the BetterWright engine
+(pruned accessibility snapshots and page screenshots for sites AT-SPI cannot
+see), the AT-SPI rung, wlroots screencopy, OCR via Tesseract, capabilities,
+budgets, btrfs checkpoints, and the C ABI.
 
 **Doesn't yet:** `kotod`, leases, network take-over.
 
