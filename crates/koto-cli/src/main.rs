@@ -1,3 +1,4 @@
+use base64::Engine;
 use clap::{Parser, ValueEnum};
 use koto_core::{
     Backend, CoreError, DEFAULT_OP_BUDGET, Execution, Observation, ObserveMode, Program, Vm, Wait,
@@ -21,6 +22,8 @@ struct Cli {
     format: Format,
     #[arg(long, value_enum, default_value_t = Observe::Auto)]
     observe: Observe,
+    #[arg(long)]
+    inline_images: bool,
     #[arg(long, default_value = "10s", value_parser = duration)]
     timeout: Duration,
     #[arg(long, default_value_t = DEFAULT_OP_BUDGET)]
@@ -332,7 +335,7 @@ fn run(cli: Cli) -> Result<i32, CoreError> {
     if let Some(path) = cli.trace {
         append_trace(&path, &execution)?;
     }
-    print_execution(&execution, cli.format, cli.seat);
+    print_execution(&execution, cli.format, cli.seat, cli.inline_images);
     Ok(execution.registers.status)
 }
 fn observation_image_path() -> std::path::PathBuf {
@@ -613,7 +616,7 @@ fn print_plan(program: &Program, format: Format) {
         }
     }
 }
-fn print_execution(execution: &Execution, format: Format, seat: Seat) {
+fn print_execution(execution: &Execution, format: Format, seat: Seat, inline_images: bool) {
     match format {
         Format::Quiet => {}
         Format::Raw => {
@@ -623,10 +626,23 @@ fn print_execution(execution: &Execution, format: Format, seat: Seat) {
                 print!("{}", execution.registers.out);
             }
         }
-        Format::Json => println!(
-            "{}",
-            serde_json::json!({"status": if execution.registers.status == 0 { "ok" } else { "halted" }, "exit":execution.registers.status, "ops":execution.trace.len(), "elapsed_ms":execution.elapsed_ms, "seat":seat, "observation":execution.observation, "trace":execution.trace})
-        ),
+        Format::Json => {
+            let mut observation = execution.observation.clone();
+            if inline_images {
+                if let Some(image) = observation
+                    .as_mut()
+                    .and_then(|observation| observation.image.as_mut())
+                {
+                    if let Ok(bytes) = fs::read(&*image) {
+                        *image = base64::engine::general_purpose::STANDARD.encode(bytes);
+                    }
+                }
+            }
+            println!(
+                "{}",
+                serde_json::json!({"status": if execution.registers.status == 0 { "ok" } else { "halted" }, "exit":execution.registers.status, "ops":execution.trace.len(), "elapsed_ms":execution.elapsed_ms, "seat":seat, "observation":observation, "trace":execution.trace})
+            )
+        }
         Format::Agent => {
             println!(
                 "#koto {} ops={} t={}ms seat={:?}",

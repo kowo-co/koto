@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+base64.workspace = true
 clap.workspace = true
 koto-core = { path = "../koto-core" }
 koto-hypr = { path = "../koto-hypr" }
