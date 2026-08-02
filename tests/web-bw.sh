@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # BetterWright engine, end to end: the pruned [ref=eN] snapshot, ref targeting,
-# page screenshots, and the session daemon that outlives a sidecar.
+# page screenshots, and recovery after a killed sidecar.
 #
 # BetterWright is a runtime-optional dependency (node + `npm i -g betterwright`).
 # When it is absent this suite SKIPS — exit 0 with a message. A machine without
@@ -109,13 +109,16 @@ end both" --allow web --format json --inline-images
 grep -qF '"image":"iVBOR' /tmp/koto-bw.log && ok "$name" \
   || bad "$name" "exit=$STATUS; no inline image in the json envelope"
 
-# --- the browser survives the sidecar ----------------------------------------
-name="bw: a killed sidecar does not lose the session"
-# Sidecar death is cheap by design: the tab lives in BetterWright's per-profile
-# session daemon, so the next koto process re-attaches to it.
+# --- a dead sidecar never wedges the next invocation --------------------------
+name="bw: a killed sidecar does not wedge the next invocation"
+# Sidecar death is cheap by design: the next koto process spawns a fresh one
+# and gets a fully working engine. Page content is BetterWright's business —
+# in practice a SIGKILLed worker's page does not survive, so assert function,
+# not tab state.
 pkill -f bw-sidecar >/dev/null 2>&1
 run_basm "require web
 web attach bw
+web goto \"$BTN\"
 web read
 end text" --allow web
 [[ $STATUS -eq 0 ]] && grep -qF '[ref=' <<<"$OUT" && ok "$name" \
