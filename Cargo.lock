@@ -644,6 +644,7 @@ dependencies = [
 name = "koto-observe"
 version = "0.1.0"
 dependencies = [
+ "atspi-common",
  "atspi-connection",
  "atspi-proxies",
  "futures-executor",
