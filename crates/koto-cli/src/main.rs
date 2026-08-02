@@ -85,12 +85,14 @@ enum Seat {
 struct Runtime {
     hypr: HyprBackend,
     tmux: Tmux,
+    last_image: Option<std::path::PathBuf>,
 }
 impl Default for Runtime {
     fn default() -> Self {
         Self {
             hypr: HyprBackend::default(),
             tmux: Tmux::default(),
+            last_image: None,
         }
     }
 }
@@ -147,11 +149,9 @@ impl Backend for Runtime {
     }
     fn observe(&mut self, mode: ObserveMode) -> Result<Observation, CoreError> {
         let image = if matches!(mode, ObserveMode::Image | ObserveMode::Both) {
-            Some(
-                koto_observe::screencopy::capture_png(&observation_image_path())?
-                    .display()
-                    .to_string(),
-            )
+            let path = koto_observe::screencopy::capture_png(&observation_image_path())?;
+            self.last_image = Some(path.clone());
+            Some(path.display().to_string())
         } else {
             None
         };
@@ -179,6 +179,25 @@ impl Backend for Runtime {
         };
         observation.image = image;
         Ok(observation)
+    }
+    fn ocr(&mut self) -> Result<String, CoreError> {
+        let image = self.last_image.as_ref().ok_or_else(|| {
+            CoreError::ObservationUnavailable("ocr needs a prior image capture".into())
+        })?;
+        let output = std::process::Command::new("tesseract")
+            .arg(image)
+            .arg("stdout")
+            .output()
+            .map_err(|error| CoreError::Backend(format!("tesseract unavailable: {error}")))?;
+        if !output.status.success() {
+            return Err(CoreError::Backend(format!(
+                "tesseract failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        String::from_utf8(output.stdout).map_err(|error| {
+            CoreError::Backend(format!("tesseract returned invalid UTF-8: {error}"))
+        })
     }
     fn list(&mut self, subject: &str) -> Result<String, CoreError> {
         self.hypr.list(subject)

@@ -798,6 +798,11 @@ pub trait Backend {
     fn selector_count(&mut self, _selector: &str) -> Result<usize, CoreError> {
         Err(CoreError::Backend("window query unavailable".into()))
     }
+    fn ocr(&mut self) -> Result<String, CoreError> {
+        Err(CoreError::ObservationUnavailable(
+            "no captured image to OCR".into(),
+        ))
+    }
 }
 
 pub struct Vm<'a, B: Backend> {
@@ -1067,7 +1072,10 @@ impl<'a, B: Backend> Vm<'a, B> {
                 execution.registers.out = self.backend.metadata(field)?;
                 Ok(())
             }
-            Op::Ocr => Err(CoreError::Backend("OCR backend unavailable".into())),
+            Op::Ocr => {
+                execution.registers.out = self.backend.ocr()?;
+                Ok(())
+            }
             Op::Web { action, args } => {
                 if action == "eval" {
                     self.require("web.eval")?;
