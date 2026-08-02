@@ -253,6 +253,9 @@ impl Backend for Runtime {
     fn kill(&mut self, selector: &str) -> Result<(), CoreError> {
         self.hypr.kill(selector)
     }
+    fn focused_window(&mut self) -> Result<koto_core::WindowRecord, CoreError> {
+        self.hypr.focused_window()
+    }
     fn metadata(&mut self, field: &str) -> Result<String, CoreError> {
         self.hypr.metadata(field)
     }
@@ -652,7 +655,7 @@ fn print_execution(execution: &Execution, format: Format, seat: Seat, inline_ima
             }
             println!(
                 "{}",
-                serde_json::json!({"status": if execution.registers.status == 0 { "ok" } else { "halted" }, "exit":execution.registers.status, "ops":execution.trace.len(), "elapsed_ms":execution.elapsed_ms, "seat":seat, "observation":observation, "trace":execution.trace})
+                serde_json::json!({"status": if execution.registers.status == 0 { "ok" } else { "halted" }, "exit":execution.registers.status, "ops":execution.trace.len(), "elapsed_ms":execution.elapsed_ms, "seat":seat, "observation":observation, "window":execution.window, "trace":execution.trace})
             )
         }
         Format::Agent => {
@@ -667,6 +670,12 @@ fn print_execution(execution: &Execution, format: Format, seat: Seat, inline_ima
                 execution.elapsed_ms,
                 seat
             );
+            if let Some(window) = &execution.window {
+                println!(
+                    "window {} ws={} addr={} title=\"{}\"",
+                    window.class, window.ws, window.addr, window.title
+                );
+            }
             if let Some(observation) = &execution.observation {
                 println!(
                     "source {} fidelity={}",

@@ -5,7 +5,9 @@
 //! be replaced by the direct virtual-keyboard implementation without changing
 //! basm or the VM.
 
-use koto_core::{Backend, CoreError, Observation, ObserveMode, Selector, SelectorOperator, Wait};
+use koto_core::{
+    Backend, CoreError, Observation, ObserveMode, Selector, SelectorOperator, Wait, WindowRecord,
+};
 use koto_input::InputBackend;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -527,6 +529,16 @@ impl Backend for HyprBackend {
     }
     fn selector_count(&mut self, selector: &str) -> Result<usize, CoreError> {
         Ok(self.resolve_all(selector)?.len())
+    }
+    fn focused_window(&mut self) -> Result<WindowRecord, CoreError> {
+        let window = self.resolve("focused")?;
+        Ok(WindowRecord {
+            class: window.class,
+            addr: window.address,
+            ws: window.workspace.id,
+            title: window.title,
+            pid: window.pid,
+        })
     }
     fn metadata(&mut self, field: &str) -> Result<String, CoreError> {
         let window = self.resolve("focused")?;

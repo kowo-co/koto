@@ -724,6 +724,14 @@ pub struct Observation {
     pub text: Option<String>,
     pub image: Option<String>,
 }
+#[derive(Debug, Clone, Serialize)]
+pub struct WindowRecord {
+    pub class: String,
+    pub addr: String,
+    pub ws: i64,
+    pub title: String,
+    pub pid: i64,
+}
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Registers {
     pub status: i32,
@@ -743,6 +751,7 @@ pub struct TraceEntry {
 #[derive(Debug, Clone, Serialize)]
 pub struct Execution {
     pub observation: Option<Observation>,
+    pub window: Option<WindowRecord>,
     pub elapsed_ms: u128,
     pub registers: Registers,
     pub trace: Vec<TraceEntry>,
@@ -796,6 +805,11 @@ pub trait Backend {
     fn metadata(&mut self, _field: &str) -> Result<String, CoreError> {
         Err(CoreError::Backend("window metadata unavailable".into()))
     }
+    fn focused_window(&mut self) -> Result<WindowRecord, CoreError> {
+        Err(CoreError::Backend(
+            "focused-window query unavailable".into(),
+        ))
+    }
     fn selector_count(&mut self, _selector: &str) -> Result<usize, CoreError> {
         Err(CoreError::Backend("window query unavailable".into()))
     }
@@ -824,6 +838,7 @@ impl<'a, B: Backend> Vm<'a, B> {
         let started = std::time::Instant::now();
         let mut execution = Execution {
             observation: None,
+            window: None,
             elapsed_ms: 0,
             registers: self.registers.clone(),
             trace: Vec::new(),
@@ -1031,6 +1046,7 @@ impl<'a, B: Backend> Vm<'a, B> {
             }
             pc = next;
         }
+        execution.window = self.backend.focused_window().ok();
         execution.elapsed_ms = started.elapsed().as_millis();
         Ok(execution)
     }
