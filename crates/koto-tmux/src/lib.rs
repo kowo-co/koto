@@ -14,6 +14,9 @@ pub struct Tmux {
     session: String,
     panes: BTreeMap<String, String>,
     active: Option<String>,
+    /// Last command sent to each pane, so `wait` can ignore the shell's echo of
+    /// it and only consider what the command actually produced.
+    last_command: BTreeMap<String, String>,
 }
 
 impl Default for Tmux {
@@ -28,6 +31,7 @@ impl Tmux {
             session: session.into(),
             panes: BTreeMap::new(),
             active: None,
+            last_command: BTreeMap::new(),
         }
     }
     pub fn ensure(&self) -> Result<(), CoreError> {
@@ -92,6 +96,10 @@ impl Tmux {
         self.run(["send-keys", "-t", &target, "-l", text])?;
         if enter {
             self.run(["send-keys", "-t", &target, "Enter"])?;
+            // Remember what was submitted. The shell echoes it into the pane, so
+            // a later `wait` would otherwise match its own command and return
+            // before the command has produced anything.
+            self.last_command.insert(target, text.to_owned());
         }
         Ok(())
     }
@@ -121,12 +129,22 @@ impl Tmux {
         }
         self.run_vec(args)
     }
+    /// Waits for `pattern` to appear in the pane's *output*.
+    ///
+    /// The shell echoes each submitted command back into the pane, so a naive
+    /// scan of the whole pane matches the command itself: `pane run "echo done"`
+    /// followed by `pane wait "done"` would return immediately, before the
+    /// command had run. Everything up to and including the echoed command line
+    /// is therefore skipped.
     pub fn wait(&mut self, pattern: &str, timeout: Duration) -> Result<(), CoreError> {
         let regex = regex::Regex::new(pattern.trim_start_matches('~'))
             .map_err(|error| CoreError::Parse(format!("invalid pane wait regex: {error}")))?;
+        let target = self.target()?;
+        let command = self.last_command.get(&target).cloned();
         let start = Instant::now();
         loop {
-            if regex.is_match(&self.read(None)?) {
+            let pane = self.read(None)?;
+            if regex.is_match(output_after_command(&pane, command.as_deref())) {
                 return Ok(());
             }
             if start.elapsed() >= timeout {
@@ -169,6 +187,15 @@ impl Tmux {
     fn run<const N: usize>(&self, args: [&str; N]) -> Result<String, CoreError> {
         self.run_vec(args.into())
     }
+    /// Forgets the recorded command, so the next `wait` scans the whole pane.
+    /// Callers that drive a pane without submitting a command line — an
+    /// interactive program, a raw key sequence — should not inherit a stale
+    /// watermark from an earlier command.
+    pub fn forget_command(&mut self) -> Result<(), CoreError> {
+        let target = self.target()?;
+        self.last_command.remove(&target);
+        Ok(())
+    }
     fn run_vec(&self, args: Vec<&str>) -> Result<String, CoreError> {
         let output = Command::new("tmux")
             .arg("-L")
@@ -184,5 +211,59 @@ impl Tmux {
         Ok(String::from_utf8_lossy(&output.stdout)
             .trim_end_matches('\n')
             .to_owned())
+    }
+}
+
+/// Returns the portion of a pane that follows the last echo of `command`.
+///
+/// tmux captures the whole visible pane, which includes the command line the
+/// shell echoed when it was submitted. Matching against that is how a `wait`
+/// ends up satisfied by its own command. Searching for the *last* occurrence
+/// keeps earlier, unrelated output from shadowing the current run.
+fn output_after_command<'a>(pane: &'a str, command: Option<&str>) -> &'a str {
+    let Some(command) = command.map(str::trim).filter(|c| !c.is_empty()) else {
+        return pane;
+    };
+    match pane.rfind(command) {
+        Some(index) => {
+            let tail = &pane[index + command.len()..];
+            // Drop the rest of the echoed line so a pattern cannot match a
+            // trailing fragment of the command itself.
+            match tail.find('\n') {
+                Some(newline) => &tail[newline + 1..],
+                None => "",
+            }
+        }
+        None => pane,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::output_after_command;
+
+    #[test]
+    fn ignores_the_echoed_command_line() {
+        let pane = "$ echo done\ndone\n$ ";
+        assert_eq!(output_after_command(pane, Some("echo done")), "done\n$ ");
+    }
+
+    #[test]
+    fn returns_nothing_while_the_command_has_not_answered() {
+        // The moment after submission: the echo is present, output is not.
+        let pane = "$ sleep 5 && echo ready\n";
+        assert_eq!(output_after_command(pane, Some("sleep 5 && echo ready")), "");
+    }
+
+    #[test]
+    fn uses_the_last_occurrence() {
+        let pane = "$ echo hi\nhi\n$ echo hi\nhi again\n";
+        assert_eq!(output_after_command(pane, Some("echo hi")), "hi again\n");
+    }
+
+    #[test]
+    fn scans_everything_without_a_recorded_command() {
+        let pane = "some output\n";
+        assert_eq!(output_after_command(pane, None), pane);
     }
 }

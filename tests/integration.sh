@@ -156,6 +156,29 @@ end text" --allow exec
 }
 
 # ------------------------------------------------------------- observation ---
+test_tmux_wait_waits() {
+  local name="tmux: pane wait waits for output, not its own echo"
+  reset_tmux
+  # `pane wait` used to scan the whole pane, so it matched the command line the
+  # shell had just echoed and returned before the command produced anything.
+  # Sleeping for two seconds makes that visible: a premature return finishes in
+  # well under a second.
+  local started elapsed
+  started=$(date +%s%N)
+  run_basm "require exec
+pane new
+pane run \"sleep 2 && echo koto-late-marker\"
+pane wait \"koto-late-marker\"
+end silent" --allow exec --timeout 20s
+  elapsed=$(( ($(date +%s%N) - started) / 1000000 ))
+  if [[ $STATUS -ne 0 ]]; then bad "$name" "exit=$STATUS $(tail -1 /tmp/koto-it.log)"; return; fi
+  if [[ $elapsed -lt 1800 ]]; then
+    bad "$name" "returned after ${elapsed}ms — it matched the echoed command, not the output"
+  else
+    ok "$name"
+  fi
+}
+
 test_observe_tmux_rung() {
   local name="observe: tmux rung reports exact fidelity"
   reset_tmux
@@ -191,7 +214,7 @@ PY
 # --------------------------------------------------------------------- run ---
 ALL=(test_hypr_selectors test_hypr_workspace_move
      test_input_typing test_input_sustained
-     test_tmux_many_panes test_tmux_exact_read
+     test_tmux_many_panes test_tmux_exact_read test_tmux_wait_waits
      test_observe_tmux_rung test_observe_image)
 
 echo "koto integration suite  (binary: $KOTO)"
