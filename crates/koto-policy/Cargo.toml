@@ -1,0 +1,9 @@
+[package]
+name = "koto-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+koto-core = { path = "../koto-core" }
+serde.workspace = true

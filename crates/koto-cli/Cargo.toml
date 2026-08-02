@@ -1,0 +1,13 @@
+[package]
+name = "koto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap.workspace = true
+koto-core = { path = "../koto-core" }
+koto-hypr = { path = "../koto-hypr" }
+koto-policy = { path = "../koto-policy" }
+serde.workspace = true
+serde_json.workspace = true

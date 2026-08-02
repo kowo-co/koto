@@ -1,0 +1,8 @@
+[package]
+name = "koto-observe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+koto-core = { path = "../koto-core" }
