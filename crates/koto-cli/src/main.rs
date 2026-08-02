@@ -140,7 +140,7 @@ impl Backend for Runtime {
                 "screencopy backend unavailable".into(),
             ));
         }
-        if let Ok(text) = self.tmux.read(None) {
+        if let Ok(text) = self.tmux.read_active(None) {
             if !text.is_empty() {
                 return Ok(Observation {
                     source: "tmux".into(),

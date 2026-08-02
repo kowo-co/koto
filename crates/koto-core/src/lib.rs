@@ -1071,6 +1071,17 @@ impl<'a, B: Backend> Vm<'a, B> {
             }
             Op::End(mode) => {
                 if *mode != ObserveMode::Silent {
+                    // `end` is the single expensive synchronization point. A
+                    // compositor idle wait prevents a just-opened surface from
+                    // being observed before it has committed its first frame.
+                    self.backend.wait(
+                        &Wait {
+                            kind: "idle".into(),
+                            value: "150ms".into(),
+                            timeout: None,
+                        },
+                        self.default_timeout,
+                    )?;
                     let observation = self.backend.observe(*mode)?;
                     execution.registers.out = observation.text.clone().unwrap_or_default();
                     execution.observation = Some(observation);

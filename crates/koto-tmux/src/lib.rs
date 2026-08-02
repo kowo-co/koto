@@ -63,7 +63,23 @@ impl Tmux {
     }
     pub fn read(&mut self, lines: Option<usize>) -> Result<String, CoreError> {
         let target = self.target()?;
-        let mut args = vec!["capture-pane", "-p", "-J", "-t", &target];
+        self.capture(&target, lines)
+    }
+    /// Reads only a pane explicitly created or selected by the program. Unlike
+    /// `read`, this never starts a tmux server as an observation side effect.
+    pub fn read_active(&self, lines: Option<usize>) -> Result<String, CoreError> {
+        let name = self
+            .active
+            .as_ref()
+            .ok_or_else(|| CoreError::Backend("no koto pane is active".into()))?;
+        let target = self
+            .panes
+            .get(name)
+            .ok_or_else(|| CoreError::Backend("active pane disappeared".into()))?;
+        self.capture(target, lines)
+    }
+    fn capture(&self, target: &str, lines: Option<usize>) -> Result<String, CoreError> {
+        let mut args = vec!["capture-pane", "-p", "-J", "-t", target];
         let lines_string;
         if let Some(lines) = lines {
             lines_string = format!("-{}", lines);
