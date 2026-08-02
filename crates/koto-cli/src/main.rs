@@ -87,7 +87,6 @@ enum Seat {
 
 struct NestedSeat {
     child: std::process::Child,
-    signature: String,
     previous_signature: Option<std::ffi::OsString>,
     previous_display: Option<std::ffi::OsString>,
 }
@@ -141,7 +140,6 @@ impl NestedSeat {
         unsafe { std::env::set_var("WAYLAND_DISPLAY", format!("koto-{signature}")) };
         Ok(Self {
             child,
-            signature,
             previous_signature,
             previous_display,
         })

@@ -11,7 +11,7 @@ This is a live engineering checklist for `spec.md` v0.1.
 - [x] Inline invocation, script files, repeated `--script`, `--scripts`, and stdin.
 - [x] Script argument expansion (`%1` through `%9`, `%*`) and shared register/session state.
 - [x] Global parsing for format, observation policy, timeouts, budgets, policy controls, trace, session, and profile.
-- [ ] `--seat nested` launches and targets an isolated headless Hyprland instance.
+- [x] `--seat nested` launches and targets an isolated headless Hyprland instance.
 - [x] Agent, raw, quiet, and JSON output modes.
 - [x] JSON image inlining via `--inline-images`.
 - [x] JSON and agent output include focused-window metadata; trace entries include argument arrays.
