@@ -78,6 +78,7 @@ pub struct InputBackend {
     _queue: EventQueue<State>,
     keyboard: ZwpVirtualKeyboardV1,
     pointer: ZwlrVirtualPointerV1,
+    keymap: xkb::Keymap,
     started: Instant,
 }
 
@@ -101,7 +102,8 @@ impl InputBackend {
             })?;
         let keyboard = keyboard_manager.create_virtual_keyboard(&seat, &qh, ());
         let pointer = pointer_manager.create_virtual_pointer(Some(&seat), &qh, ());
-        install_keymap(&keyboard)?;
+        let keymap = compile_keymap()?;
+        install_keymap(&keyboard, &keymap)?;
         connection
             .flush()
             .map_err(|error| InputError::Unavailable(error.to_string()))?;
@@ -110,6 +112,7 @@ impl InputBackend {
             _queue: queue,
             keyboard,
             pointer,
+            keymap,
             started: Instant::now(),
         })
     }
@@ -134,22 +137,42 @@ impl InputBackend {
         self.keyboard.key(self.time(), key, u32::from(pressed));
         Ok(())
     }
-    /// Types printable ASCII using XKB key names. Non-ASCII text is intentionally
-    /// rejected so callers can choose the clipboard path rather than corrupt it.
+    /// Synthesises Unicode through the active XKB layout, including its level
+    /// modifiers (for example Shift or AltGr). Clipboard paste remains a
+    /// performance optimization, not a character-set workaround.
     pub fn text(&self, text: &str) -> Result<(), InputError> {
         for character in text.chars() {
-            let (shift, key) =
-                printable_key(character).ok_or_else(|| InputError::Key(character.to_string()))?;
-            if shift {
-                self.key("shift", true)?;
-            }
-            self.key(key, true)?;
-            self.key(key, false)?;
-            if shift {
-                self.key("shift", false)?;
-            }
+            self.character(character)?;
         }
         self.flush()
+    }
+    fn character(&self, character: char) -> Result<(), InputError> {
+        let symbol = xkb::Keysym::from_char(character);
+        for raw in self.keymap.min_keycode().raw()..=self.keymap.max_keycode().raw() {
+            let keycode = xkb::Keycode::new(raw);
+            for layout in 0..self.keymap.num_layouts_for_key(keycode) {
+                for level in 0..self.keymap.num_levels_for_key(keycode, layout) {
+                    if !self
+                        .keymap
+                        .key_get_syms_by_level(keycode, layout, level)
+                        .contains(&symbol)
+                    {
+                        continue;
+                    }
+                    let mut masks = [0_u32; 32];
+                    let count = self
+                        .keymap
+                        .key_get_mods_for_level(keycode, layout, level, &mut masks);
+                    let mask = masks[..count].iter().copied().min().unwrap_or(0);
+                    self.keyboard.modifiers(mask, 0, 0, layout);
+                    self.keyboard.key(self.time(), raw.saturating_sub(8), 1);
+                    self.keyboard.key(self.time(), raw.saturating_sub(8), 0);
+                    self.keyboard.modifiers(0, 0, 0, layout);
+                    return Ok(());
+                }
+            }
+        }
+        Err(InputError::Key(character.to_string()))
     }
     pub fn move_absolute(&self, x: u32, y: u32, width: u32, height: u32) -> Result<(), InputError> {
         if width == 0 || height == 0 {
@@ -198,18 +221,12 @@ impl InputBackend {
     }
 }
 
-fn install_keymap(keyboard: &ZwpVirtualKeyboardV1) -> Result<(), InputError> {
+fn compile_keymap() -> Result<xkb::Keymap, InputError> {
     let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
-    let keymap = xkb::Keymap::new_from_names(
-        &context,
-        "",
-        "",
-        "",
-        "",
-        None,
-        xkb::KEYMAP_COMPILE_NO_FLAGS,
-    )
-    .ok_or_else(|| InputError::Unavailable("could not compile the active XKB keymap".into()))?;
+    xkb::Keymap::new_from_names(&context, "", "", "", "", None, xkb::KEYMAP_COMPILE_NO_FLAGS)
+        .ok_or_else(|| InputError::Unavailable("could not compile the active XKB keymap".into()))
+}
+fn install_keymap(keyboard: &ZwpVirtualKeyboardV1, keymap: &xkb::Keymap) -> Result<(), InputError> {
     let source = keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
     let path = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap_or_else(|| "/tmp".into()))
         .join(format!("koto-keymap-{}", std::process::id()));
@@ -224,54 +241,6 @@ fn install_keymap(keyboard: &ZwpVirtualKeyboardV1) -> Result<(), InputError> {
     Ok(())
 }
 
-fn printable_key(character: char) -> Option<(bool, &'static str)> {
-    let plain = match character {
-        'a'..='z' => return Some((false, Box::leak(character.to_string().into_boxed_str()))),
-        'A'..='Z' => {
-            return Some((
-                true,
-                Box::leak(character.to_ascii_lowercase().to_string().into_boxed_str()),
-            ));
-        }
-        '0'..='9' => return Some((false, Box::leak(character.to_string().into_boxed_str()))),
-        ' ' => (false, "space"),
-        '\n' => (false, "enter"),
-        '-' => (false, "minus"),
-        '=' => (false, "equal"),
-        '[' => (false, "leftbrace"),
-        ']' => (false, "rightbrace"),
-        '\\' => (false, "backslash"),
-        ';' => (false, "semicolon"),
-        '\'' => (false, "apostrophe"),
-        '`' => (false, "grave"),
-        ',' => (false, "comma"),
-        '.' => (false, "dot"),
-        '/' => (false, "slash"),
-        '!' => (true, "1"),
-        '@' => (true, "2"),
-        '#' => (true, "3"),
-        '$' => (true, "4"),
-        '%' => (true, "5"),
-        '^' => (true, "6"),
-        '&' => (true, "7"),
-        '*' => (true, "8"),
-        '(' => (true, "9"),
-        ')' => (true, "0"),
-        '_' => (true, "minus"),
-        '+' => (true, "equal"),
-        '{' => (true, "leftbrace"),
-        '}' => (true, "rightbrace"),
-        '|' => (true, "backslash"),
-        ':' => (true, "semicolon"),
-        '"' => (true, "apostrophe"),
-        '~' => (true, "grave"),
-        '<' => (true, "comma"),
-        '>' => (true, "dot"),
-        '?' => (true, "slash"),
-        _ => return None,
-    };
-    Some(plain)
-}
 fn evdev_key(key: &str) -> Option<u32> {
     let normalized = key.to_ascii_lowercase();
     let key = normalized.as_str();

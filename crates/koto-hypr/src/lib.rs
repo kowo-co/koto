@@ -249,7 +249,7 @@ impl Backend for HyprBackend {
             }
             return self.key(&["ctrl".into(), "v".into()]);
         }
-        if text.len() > 200 || !text.is_ascii() {
+        if text.len() > 200 {
             return self.text(text, true);
         }
         self.input()?
