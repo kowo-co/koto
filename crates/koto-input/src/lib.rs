@@ -151,6 +151,15 @@ impl InputBackend {
         }
         self.flush()
     }
+    pub fn move_absolute(&self, x: u32, y: u32, width: u32, height: u32) -> Result<(), InputError> {
+        if width == 0 || height == 0 {
+            return Err(InputError::Unavailable("invalid compositor extent".into()));
+        }
+        self.pointer
+            .motion_absolute(self.time(), x, y, width, height);
+        self.pointer.frame();
+        self.flush()
+    }
     pub fn click_primary(&self) -> Result<(), InputError> {
         const BTN_LEFT: u32 = 0x110;
         self.pointer

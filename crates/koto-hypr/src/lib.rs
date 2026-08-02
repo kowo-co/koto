@@ -31,6 +31,21 @@ pub struct Window {
     pub workspace: Workspace,
     #[serde(default)]
     pub focus_history_id: i64,
+    #[serde(default)]
+    pub at: [i32; 2],
+    #[serde(default)]
+    pub size: [i32; 2],
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct MonitorGeometry {
+    #[serde(default)]
+    x: i32,
+    #[serde(default)]
+    y: i32,
+    #[serde(default)]
+    width: i32,
+    #[serde(default)]
+    height: i32,
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Workspace {
@@ -101,6 +116,43 @@ impl HyprBackend {
     }
     fn dispatch(&self, command: &str) -> Result<(), CoreError> {
         hyprctl(["dispatch", command]).map(|_| ())
+    }
+    fn pointer_coordinates(&self, window: &Window) -> Result<(u32, u32, u32, u32), CoreError> {
+        let monitors: Vec<MonitorGeometry> = serde_json::from_str(&hyprctl(["-j", "monitors"])?)
+            .map_err(|error| {
+                CoreError::Backend(format!("invalid hyprctl monitors JSON: {error}"))
+            })?;
+        let left = monitors
+            .iter()
+            .map(|monitor| monitor.x)
+            .min()
+            .ok_or_else(|| CoreError::Backend("no monitors".into()))?;
+        let top = monitors
+            .iter()
+            .map(|monitor| monitor.y)
+            .min()
+            .ok_or_else(|| CoreError::Backend("no monitors".into()))?;
+        let right = monitors
+            .iter()
+            .map(|monitor| monitor.x + monitor.width)
+            .max()
+            .unwrap();
+        let bottom = monitors
+            .iter()
+            .map(|monitor| monitor.y + monitor.height)
+            .max()
+            .unwrap();
+        let x = window.at[0] + window.size[0] / 2 - left;
+        let y = window.at[1] + window.size[1] / 2 - top;
+        if x < 0 || y < 0 || right <= left || bottom <= top {
+            return Err(CoreError::Backend("invalid window geometry".into()));
+        }
+        Ok((
+            x as u32,
+            y as u32,
+            (right - left) as u32,
+            (bottom - top) as u32,
+        ))
     }
     fn event_socket() -> Result<UnixStream, CoreError> {
         let runtime = std::env::var_os("XDG_RUNTIME_DIR")
@@ -212,8 +264,14 @@ impl Backend for HyprBackend {
                 let selector = args
                     .first()
                     .ok_or_else(|| CoreError::Parse("click needs a selector".into()))?;
-                self.focus(selector)?;
-                self.input()?
+                let window = self.resolve(selector)?;
+                let (x, y, width, height) = self.pointer_coordinates(&window)?;
+                self.dispatch(&format!("focuswindow address:{}", window.address))?;
+                let input = self.input()?;
+                input
+                    .move_absolute(x, y, width, height)
+                    .map_err(|error| CoreError::Backend(error.to_string()))?;
+                input
                     .click_primary()
                     .map_err(|error| CoreError::Backend(error.to_string()))
             }
