@@ -1,5 +1,8 @@
 # Specification implementation tracker
 
+Scope for the current effort: the computer-use pipeline, excluding `kotod`, leases, and network take-over.
+
+
 Legend: `[x]` implemented, `[~]` implemented with documented gaps, `[ ]` not implemented.
 This is a live engineering checklist for `spec.md` v0.1.
 
@@ -8,7 +11,7 @@ This is a live engineering checklist for `spec.md` v0.1.
 - [x] Inline invocation, script files, repeated `--script`, `--scripts`, and stdin.
 - [x] Script argument expansion (`%1` through `%9`, `%*`) and shared register/session state.
 - [x] Global parsing for format, observation policy, timeouts, budgets, policy controls, trace, session, and profile.
-- [~] `--seat` is parsed and emitted, but nested seats are not available yet.
+- [ ] `--seat nested` launches and targets an isolated headless Hyprland instance.
 - [x] Agent, raw, quiet, and JSON output modes.
 - [x] JSON image inlining via `--inline-images`.
 - [x] JSON and agent output include focused-window metadata; trace entries include argument arrays.
@@ -38,8 +41,8 @@ This is a live engineering checklist for `spec.md` v0.1.
 - [x] Hyprland metadata rung.
 - [x] In-process wlr-screencopy PNG rung, `end image`/`end both`, and JSON image inlining.
 - [x] OCR instruction over the latest capture when Tesseract is installed.
-- [~] CDP accessibility snapshot is returned by `web read`; it is not yet an automatic top observation-ladder rung.
-- [x] AT-SPI2 bounded structured-tree rung.
+- [ ] CDP accessibility snapshot is the automatic top observation-ladder rung.
+- [~] AT-SPI2 bounded structured-tree rung works globally; focused-window targeting is pending.
 - [~] OCR uses the system Tesseract executable rather than an embedded engine.
 
 ## Safety, isolation, and integration
@@ -49,6 +52,6 @@ This is a live engineering checklist for `spec.md` v0.1.
 - [~] Cancellation is checked between instructions, not inside every blocking backend operation.
 - [ ] Nested Hyprland seats.
 - [~] Btrfs checkpoints and rollback for explicitly configured subvolumes (`KOTO_BTRFS_SUBVOLUME`, `KOTO_BTRFS_SNAPSHOT_DIR`); automatic Omarchy layout discovery is pending.
-- [ ] `kotod`, leases, visible takeover indication, and remote take-over.
-- [~] `libkoto` exports ABI version and parser validation only; executable C ABI remains.
-- [~] Omarchy binding generator handles normal `bind = ..., exec, ...` lines with common target heuristics; web-app generation remains.
+- [x] Excluded from the computer-use scope: `kotod`, leases, visible takeover indication, and remote take-over.
+- [ ] `libkoto` exposes parse and headless/eval execution over the C ABI.
+- [ ] Omarchy stdlib generation covers normal bindings and generated CDP web-app macros.

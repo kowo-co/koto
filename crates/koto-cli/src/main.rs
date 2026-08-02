@@ -77,7 +77,7 @@ impl From<Observe> for ObserveMode {
         }
     }
 }
-#[derive(Debug, Clone, Copy, ValueEnum, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum Seat {
     Host,
@@ -85,6 +85,82 @@ enum Seat {
     Auto,
 }
 
+struct NestedSeat {
+    child: std::process::Child,
+    signature: String,
+    previous_signature: Option<std::ffi::OsString>,
+    previous_display: Option<std::ffi::OsString>,
+}
+impl NestedSeat {
+    fn start() -> Result<Self, CoreError> {
+        let signature = format!(
+            "koto-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+            .ok_or_else(|| CoreError::Backend("nested seat needs XDG_RUNTIME_DIR".into()))?;
+        let mut child = std::process::Command::new("Hyprland")
+            .arg("--socket")
+            .arg(format!("koto-{signature}"))
+            .env("HYPRLAND_INSTANCE_SIGNATURE", &signature)
+            .env("WLR_BACKENDS", "headless")
+            .env_remove("WAYLAND_DISPLAY")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|error| CoreError::Backend(format!("launch nested Hyprland: {error}")))?;
+        let socket = std::path::PathBuf::from(runtime)
+            .join("hypr")
+            .join(&signature)
+            .join(".socket.sock");
+        let started = std::time::Instant::now();
+        while !socket.exists() {
+            if started.elapsed() > Duration::from_secs(10) {
+                let _ = child.kill();
+                return Err(CoreError::Backend(
+                    "nested Hyprland did not expose its IPC socket".into(),
+                ));
+            }
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|error| CoreError::Backend(error.to_string()))?
+            {
+                return Err(CoreError::Backend(format!(
+                    "nested Hyprland exited early: {status}"
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let previous_signature = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE");
+        let previous_display = std::env::var_os("WAYLAND_DISPLAY");
+        unsafe { std::env::set_var("HYPRLAND_INSTANCE_SIGNATURE", &signature) };
+        unsafe { std::env::set_var("WAYLAND_DISPLAY", format!("koto-{signature}")) };
+        Ok(Self {
+            child,
+            signature,
+            previous_signature,
+            previous_display,
+        })
+    }
+}
+impl Drop for NestedSeat {
+    fn drop(&mut self) {
+        match &self.previous_signature {
+            Some(value) => unsafe { std::env::set_var("HYPRLAND_INSTANCE_SIGNATURE", value) },
+            None => unsafe { std::env::remove_var("HYPRLAND_INSTANCE_SIGNATURE") },
+        }
+        match &self.previous_display {
+            Some(value) => unsafe { std::env::set_var("WAYLAND_DISPLAY", value) },
+            None => unsafe { std::env::remove_var("WAYLAND_DISPLAY") },
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
 struct Runtime {
     hypr: HyprBackend,
     tmux: Tmux,
@@ -350,7 +426,27 @@ fn run(cli: Cli) -> Result<i32, CoreError> {
         .flatten()
         .collect();
     policy.require_all(&capabilities, &required)?;
+    let requested_seat = match cli.seat {
+        Seat::Nested => Seat::Nested,
+        Seat::Host => Seat::Host,
+        Seat::Auto => profile
+            .seat
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+            .map(|seat| match seat {
+                "nested" => Seat::Nested,
+                "host" => Seat::Host,
+                _ => Seat::Auto,
+            })
+            .unwrap_or(Seat::Auto),
+    };
     let registers = load_session(&cli.session)?;
+    let _nested = if requested_seat == Seat::Nested {
+        Some(NestedSeat::start()?)
+    } else {
+        None
+    };
     let mut backend = Runtime::default();
     let mut vm = Vm {
         backend: &mut backend,
@@ -381,7 +477,7 @@ fn run(cli: Cli) -> Result<i32, CoreError> {
     if let Some(path) = cli.trace {
         append_trace(&path, &execution)?;
     }
-    print_execution(&execution, cli.format, cli.seat, cli.inline_images);
+    print_execution(&execution, cli.format, requested_seat, cli.inline_images);
     Ok(execution.registers.status)
 }
 fn observation_image_path() -> std::path::PathBuf {
