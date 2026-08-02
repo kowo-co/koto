@@ -247,6 +247,9 @@ impl Backend for Runtime {
     fn spawn(&mut self, command: &[String]) -> Result<String, CoreError> {
         self.hypr.spawn(command)
     }
+    fn checkpoint(&mut self, name: &str, rollback: bool) -> Result<(), CoreError> {
+        self.hypr.checkpoint(name, rollback)
+    }
     fn kill(&mut self, selector: &str) -> Result<(), CoreError> {
         self.hypr.kill(selector)
     }

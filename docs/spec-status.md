@@ -12,7 +12,7 @@ This is a live engineering checklist for `spec.md` v0.1.
 - [x] Agent, raw, quiet, and JSON output modes.
 - [x] JSON image inlining via `--inline-images`.
 - [~] JSON lacks the required focused-window object and trace argument arrays.
-- [~] Failed runs do not yet persist their partial trace.
+- [x] Failed runs persist the completed and failing instruction entries to `--trace`.
 
 ## basm core
 
@@ -48,7 +48,7 @@ This is a live engineering checklist for `spec.md` v0.1.
 - [x] Emergency kill-switch installation, cancellation marker, and held-key release on runtime exit.
 - [~] Cancellation is checked between instructions, not inside every blocking backend operation.
 - [ ] Nested Hyprland seats.
-- [ ] Btrfs checkpoints and rollback.
+- [~] Btrfs checkpoints and rollback for explicitly configured subvolumes (`KOTO_BTRFS_SUBVOLUME`, `KOTO_BTRFS_SNAPSHOT_DIR`); automatic Omarchy layout discovery is pending.
 - [ ] `kotod`, leases, visible takeover indication, and remote take-over.
 - [~] `libkoto` exports ABI version and parser validation only; executable C ABI remains.
 - [~] Omarchy binding generator handles normal `bind = ..., exec, ...` lines with common target heuristics; web-app generation remains.

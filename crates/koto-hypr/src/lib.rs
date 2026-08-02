@@ -422,6 +422,79 @@ impl Backend for HyprBackend {
         };
         self.dispatch(&command)
     }
+    fn checkpoint(&mut self, name: &str, rollback: bool) -> Result<(), CoreError> {
+        if name.is_empty() || name.contains('/') || name.contains("..") {
+            return Err(CoreError::Parse(
+                "checkpoint name must be a simple name".into(),
+            ));
+        }
+        let source = std::env::var_os("KOTO_BTRFS_SUBVOLUME")
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| {
+                CoreError::Backend(
+                    "set KOTO_BTRFS_SUBVOLUME to the btrfs subvolume to checkpoint".into(),
+                )
+            })?;
+        let snapshots = std::env::var_os("KOTO_BTRFS_SNAPSHOT_DIR")
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| {
+                CoreError::Backend(
+                    "set KOTO_BTRFS_SNAPSHOT_DIR to a sibling btrfs snapshot directory".into(),
+                )
+            })?;
+        let snapshot = snapshots.join(name);
+        if !rollback {
+            std::fs::create_dir_all(&snapshots).map_err(|error| {
+                CoreError::Backend(format!("create checkpoint directory: {error}"))
+            })?;
+            let status = Command::new("btrfs")
+                .args(["subvolume", "snapshot", "-r"])
+                .arg(&source)
+                .arg(&snapshot)
+                .status()
+                .map_err(|error| CoreError::Backend(format!("btrfs unavailable: {error}")))?;
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(CoreError::Backend(format!(
+                    "could not create checkpoint {}",
+                    snapshot.display()
+                )))
+            };
+        }
+        if std::env::var_os("KOTO_BTRFS_ALLOW_ROLLBACK").as_deref()
+            != Some(std::ffi::OsStr::new("1"))
+        {
+            return Err(CoreError::Backend("rollback requires KOTO_BTRFS_ALLOW_ROLLBACK=1; it replaces the configured subvolume".into()));
+        }
+        if !snapshot.exists() {
+            return Err(CoreError::SelectorNotFound(format!("checkpoint {name}")));
+        }
+        let delete = Command::new("btrfs")
+            .args(["subvolume", "delete"])
+            .arg(&source)
+            .status()
+            .map_err(|error| CoreError::Backend(format!("btrfs unavailable: {error}")))?;
+        if !delete.success() {
+            return Err(CoreError::Backend(format!(
+                "could not remove subvolume {}",
+                source.display()
+            )));
+        }
+        let restore = Command::new("btrfs")
+            .args(["subvolume", "snapshot"])
+            .arg(&snapshot)
+            .arg(&source)
+            .status()
+            .map_err(|error| CoreError::Backend(format!("btrfs unavailable: {error}")))?;
+        if restore.success() {
+            Ok(())
+        } else {
+            Err(CoreError::Backend(format!(
+                "could not restore checkpoint {name}"
+            )))
+        }
+    }
     fn kill(&mut self, selector: &str) -> Result<(), CoreError> {
         if let Some(scope) = selector.strip_prefix("scope=") {
             let status = Command::new("systemctl")
