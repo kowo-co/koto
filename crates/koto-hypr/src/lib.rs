@@ -228,11 +228,22 @@ fn hyprctl<const N: usize>(args: [&str; N]) -> Result<String, CoreError> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().into())
 }
 
+/// Separates a program's mistake from an environment failure.
+///
+/// An unknown key name is the caller's error and is fixable by rewriting the
+/// instruction; an unreachable compositor is not. Reporting both as `Backend`
+/// tells the caller the machine is broken when it merely misspelled a key,
+/// which is the difference between "retry differently" and "give up".
+fn input_error(error: koto_input::InputError) -> CoreError {
+    match error {
+        koto_input::InputError::Key(_) => CoreError::Parse(error.to_string()),
+        koto_input::InputError::Unavailable(_) => CoreError::Backend(error.to_string()),
+    }
+}
+
 impl Backend for HyprBackend {
     fn key(&mut self, keys: &[String]) -> Result<(), CoreError> {
-        self.input()?
-            .chord(keys)
-            .map_err(|error| CoreError::Backend(error.to_string()))
+        self.input()?.chord(keys).map_err(input_error)
     }
     fn text(&mut self, text: &str, paste: bool) -> Result<(), CoreError> {
         if paste {
@@ -255,16 +266,12 @@ impl Backend for HyprBackend {
         if text.len() > 200 {
             return self.text(text, true);
         }
-        self.input()?
-            .text(text)
-            .map_err(|error| CoreError::Backend(error.to_string()))
+        self.input()?.text(text).map_err(input_error)
     }
     fn key_state(&mut self, keys: &[String], pressed: bool) -> Result<(), CoreError> {
         let input = self.input()?;
         for key in keys {
-            input
-                .key(key, pressed)
-                .map_err(|error| CoreError::Backend(error.to_string()))?;
+            input.key(key, pressed).map_err(input_error)?;
         }
         Ok(())
     }
