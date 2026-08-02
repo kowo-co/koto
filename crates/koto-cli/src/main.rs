@@ -89,7 +89,7 @@ struct Runtime {
 impl Default for Runtime {
     fn default() -> Self {
         Self {
-            hypr: HyprBackend,
+            hypr: HyprBackend::default(),
             tmux: Tmux::default(),
         }
     }
@@ -97,6 +97,12 @@ impl Default for Runtime {
 impl Backend for Runtime {
     fn key(&mut self, keys: &[String]) -> Result<(), CoreError> {
         self.hypr.key(keys)
+    }
+    fn key_state(&mut self, keys: &[String], pressed: bool) -> Result<(), CoreError> {
+        self.hypr.key_state(keys, pressed)
+    }
+    fn pointer(&mut self, action: &str, args: &[String]) -> Result<(), CoreError> {
+        self.hypr.pointer(action, args)
     }
     fn text(&mut self, text: &str, paste: bool) -> Result<(), CoreError> {
         self.hypr.text(text, paste)
@@ -463,7 +469,7 @@ fn bind_arguments(source: &str, arguments: &[String]) -> String {
     result
 }
 fn resolve_dry_run(program: &Program) -> Result<(), CoreError> {
-    let backend = HyprBackend;
+    let backend = HyprBackend::default();
     for instruction in &program.instructions {
         let selector = match &instruction.op {
             koto_core::Op::Focus(selector)

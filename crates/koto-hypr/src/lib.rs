@@ -6,6 +6,7 @@
 //! basm or the VM.
 
 use koto_core::{Backend, CoreError, Observation, ObserveMode, Selector, SelectorOperator, Wait};
+use koto_input::InputBackend;
 use serde::{Deserialize, Serialize};
 use std::{
     io::{ErrorKind, Read},
@@ -39,9 +40,23 @@ pub struct Workspace {
     pub name: String,
 }
 
-#[derive(Default)]
-pub struct HyprBackend;
+pub struct HyprBackend {
+    input: Option<InputBackend>,
+}
+impl Default for HyprBackend {
+    fn default() -> Self {
+        Self { input: None }
+    }
+}
 impl HyprBackend {
+    fn input(&mut self) -> Result<&mut InputBackend, CoreError> {
+        if self.input.is_none() {
+            self.input = Some(
+                InputBackend::connect().map_err(|error| CoreError::Backend(error.to_string()))?,
+            );
+        }
+        Ok(self.input.as_mut().unwrap())
+    }
     pub fn available() -> bool {
         Command::new("hyprctl")
             .arg("-j")
@@ -153,22 +168,9 @@ fn hyprctl<const N: usize>(args: [&str; N]) -> Result<String, CoreError> {
 
 impl Backend for HyprBackend {
     fn key(&mut self, keys: &[String]) -> Result<(), CoreError> {
-        if keys.is_empty() {
-            return Err(CoreError::Backend("empty chord".into()));
-        }
-        let key = keys.last().unwrap();
-        let mods = keys[..keys.len() - 1]
-            .iter()
-            .map(|key| match key.as_str() {
-                "super" => "SUPER",
-                "ctrl" => "CTRL",
-                "alt" => "ALT",
-                "shift" => "SHIFT",
-                other => other,
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-        self.dispatch(&format!("sendshortcut {mods}, {key}"))
+        self.input()?
+            .chord(keys)
+            .map_err(|error| CoreError::Backend(error.to_string()))
     }
     fn text(&mut self, text: &str, paste: bool) -> Result<(), CoreError> {
         if paste {
@@ -188,11 +190,55 @@ impl Backend for HyprBackend {
             }
             return self.key(&["ctrl".into(), "v".into()]);
         }
-        for character in text.chars() {
-            self.dispatch(&format!("sendkeystate , {character}, down"))?;
-            self.dispatch(&format!("sendkeystate , {character}, up"))?;
+        if text.len() > 200 || !text.is_ascii() {
+            return self.text(text, true);
+        }
+        self.input()?
+            .text(text)
+            .map_err(|error| CoreError::Backend(error.to_string()))
+    }
+    fn key_state(&mut self, keys: &[String], pressed: bool) -> Result<(), CoreError> {
+        let input = self.input()?;
+        for key in keys {
+            input
+                .key(key, pressed)
+                .map_err(|error| CoreError::Backend(error.to_string()))?;
         }
         Ok(())
+    }
+    fn pointer(&mut self, action: &str, args: &[String]) -> Result<(), CoreError> {
+        match action {
+            "click" => {
+                let selector = args
+                    .first()
+                    .ok_or_else(|| CoreError::Parse("click needs a selector".into()))?;
+                self.focus(selector)?;
+                self.input()?
+                    .click_primary()
+                    .map_err(|error| CoreError::Backend(error.to_string()))
+            }
+            "scroll" => {
+                let direction = args
+                    .first()
+                    .ok_or_else(|| CoreError::Parse("scroll needs a direction".into()))?;
+                let count = args
+                    .get(1)
+                    .ok_or_else(|| CoreError::Parse("scroll needs a count".into()))?
+                    .parse::<i32>()
+                    .map_err(|_| CoreError::Parse("scroll count must be an integer".into()))?;
+                let (vertical, sign) = match direction.as_str() {
+                    "up" => (true, 1),
+                    "down" => (true, -1),
+                    "left" => (false, -1),
+                    "right" => (false, 1),
+                    _ => return Err(CoreError::Parse("invalid scroll direction".into())),
+                };
+                self.input()?
+                    .scroll(vertical, sign * count)
+                    .map_err(|error| CoreError::Backend(error.to_string()))
+            }
+            _ => Err(CoreError::Unsupported(format!("pointer {action}"))),
+        }
     }
     fn wait(&mut self, wait: &Wait, default_timeout: Duration) -> Result<(), CoreError> {
         let timeout = wait

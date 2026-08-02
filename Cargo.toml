@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "crates/koto-core",
   "crates/koto-hypr",
+  "crates/koto-input",
   "crates/koto-observe",
   "crates/koto-policy",
   "crates/koto-tmux",

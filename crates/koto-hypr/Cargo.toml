@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 koto-core = { path = "../koto-core" }
+koto-input = { path = "../koto-input" }
 serde.workspace = true
 serde_json.workspace = true
 regex.workspace = true
