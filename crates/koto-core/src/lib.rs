@@ -735,6 +735,7 @@ pub struct Registers {
 pub struct TraceEntry {
     pub i: usize,
     pub op: String,
+    pub args: Vec<String>,
     pub ms: u128,
     pub status: i32,
     pub warning: Option<String>,
@@ -1010,6 +1011,7 @@ impl<'a, B: Backend> Vm<'a, B> {
             execution.trace.push(TraceEntry {
                 i: instruction.index,
                 op: op_name(&instruction.op).into(),
+                args: op_args(&instruction.op),
                 ms: tick.elapsed().as_millis(),
                 status,
                 warning:
@@ -1317,6 +1319,61 @@ fn parse_duration(value: &str) -> Result<Duration, CoreError> {
         .and_then(|number| number.checked_mul(multiplier))
         .map(Duration::from_millis)
         .ok_or_else(|| CoreError::Parse(format!("invalid duration `{value}`")))
+}
+fn op_args(op: &Op) -> Vec<String> {
+    match op {
+        Op::Key(values)
+        | Op::Hold(values)
+        | Op::Release(values)
+        | Op::Spawn(values)
+        | Op::Require(values) => values.clone(),
+        Op::Tap(value)
+        | Op::Type(value)
+        | Op::Paste(value)
+        | Op::Click(value)
+        | Op::Peek(value)
+        | Op::Focus(value)
+        | Op::Workspace(value)
+        | Op::SendWorkspace(value)
+        | Op::Swap(value)
+        | Op::Move(value)
+        | Op::Monitor(value)
+        | Op::List(value)
+        | Op::Kill(value)
+        | Op::Label(value)
+        | Op::Call(value)
+        | Op::Def(value)
+        | Op::Include(value)
+        | Op::Assert(value)
+        | Op::Expect(value)
+        | Op::Checkpoint(value)
+        | Op::Rollback(value)
+        | Op::Note(value) => vec![value.clone()],
+        Op::Scroll { direction, count } => vec![direction.clone(), count.to_string()],
+        Op::End(mode) => vec![format!("{mode:?}").to_lowercase()],
+        Op::See { register, mode } => register
+            .iter()
+            .cloned()
+            .chain(std::iter::once(format!("{mode:?}").to_lowercase()))
+            .collect(),
+        Op::Wait(wait) => std::iter::once(wait.kind.clone())
+            .chain(std::iter::once(wait.value.clone()))
+            .chain(wait.timeout.iter().cloned())
+            .collect(),
+        Op::Close(selector) => selector.iter().cloned().collect(),
+        Op::WindowAction(value) => vec![value.clone()],
+        Op::Pane { action, args } | Op::Web { action, args } => std::iter::once(action.clone())
+            .chain(args.iter().cloned())
+            .collect(),
+        Op::Jump { kind, args } => std::iter::once(kind.clone())
+            .chain(args.iter().cloned())
+            .collect(),
+        Op::Rep(count) => vec![count.to_string()],
+        Op::While { predicate, max } => vec![predicate.clone(), "max".into(), max.to_string()],
+        Op::Budget { kind, value } => vec![kind.clone(), value.clone()],
+        Op::Halt(code) => vec![code.to_string()],
+        Op::Ocr | Op::Ret | Op::EndDef | Op::Nop | Op::BlockEnd => Vec::new(),
+    }
 }
 fn op_name(op: &Op) -> &'static str {
     match op {

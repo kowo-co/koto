@@ -11,7 +11,7 @@ This is a live engineering checklist for `spec.md` v0.1.
 - [~] `--seat` is parsed and emitted, but nested seats are not available yet.
 - [x] Agent, raw, quiet, and JSON output modes.
 - [x] JSON image inlining via `--inline-images`.
-- [~] JSON lacks the required focused-window object and trace argument arrays.
+- [~] JSON lacks the required focused-window object; trace entries include argument arrays.
 - [x] Failed runs persist the completed and failing instruction entries to `--trace`.
 
 ## basm core
