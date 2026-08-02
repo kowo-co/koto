@@ -293,17 +293,21 @@ fn sync_stdlib() -> Result<(), CoreError> {
         .map(str::trim)
         .filter(|line| line.starts_with("bind") && line.contains(", exec,"))
     {
-        let values: Vec<_> = line.splitn(5, ',').map(str::trim).collect();
-        if values.len() < 5 {
+        // Hyprland's form is `bind = MODS, KEY, exec, COMMAND`.
+        let Some((_, binding)) = line.split_once('=') else {
+            continue;
+        };
+        let values: Vec<_> = binding.splitn(4, ',').map(str::trim).collect();
+        if values.len() != 4 || values[2] != "exec" {
             continue;
         }
-        let modifiers = values[1]
+        let modifiers = values[0]
             .replace('$', "")
             .replace("mainMod", "super")
             .replace(' ', "")
             .to_lowercase();
-        let key = values[2].to_lowercase();
-        let command = values[4];
+        let key = values[1].to_lowercase();
+        let command = values[3];
         let name = command
             .split_whitespace()
             .next()
@@ -314,9 +318,26 @@ fn sync_stdlib() -> Result<(), CoreError> {
         if name.is_empty() {
             continue;
         }
+        let target = if command.contains("alacritty") || command.contains("terminal") {
+            Some(("Alacritty", "3s", "150ms"))
+        } else if command.contains("chrom") || command.contains("browser") {
+            Some(("chromium", "5s", "250ms"))
+        } else if command.contains("walker") || command.contains("launcher") {
+            Some(("walker", "2s", "150ms"))
+        } else {
+            None
+        };
         output.push_str(&format!(
-            "\ndef omarchy.{name}()\n  key {modifiers} {key}\n  wait idle 150ms\nenddef\n"
+            "\ndef omarchy.{name}()\n  key {modifiers} {key}\n"
         ));
+        if let Some((class, timeout, idle)) = target {
+            output.push_str(&format!(
+                "  wait window class={class} timeout {timeout}\n  wait idle {idle}\n"
+            ));
+        } else {
+            output.push_str("  wait idle 150ms\n");
+        }
+        output.push_str("enddef\n");
     }
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
