@@ -12,3 +12,4 @@ wayland-backend = "0.3.16"
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 wayland-scanner = "0.31.7"
 xkbcommon = "0.9"
+libc = "0.2"

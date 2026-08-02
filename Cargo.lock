@@ -631,6 +631,7 @@ name = "koto-input"
 version = "0.1.0"
 dependencies = [
  "koto-core",
+ "libc",
  "thiserror",
  "wayland-backend",
  "wayland-client",

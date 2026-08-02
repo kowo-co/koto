@@ -123,11 +123,26 @@ impl InputBackend {
         if keys.is_empty() {
             return Err(InputError::Key("empty chord".into()));
         }
+        // A virtual keyboard owns its modifier state: pressing the modifier's
+        // keycode is not enough, the state has to be sent explicitly. Terminals
+        // recover Ctrl from the raw keycode themselves, so this looked like it
+        // worked; GUI toolkits read the compositor's state and saw an unmodified
+        // key, turning `ctrl s` into a plain `s`.
+        let mask = keys[..keys.len() - 1]
+            .iter()
+            .filter_map(|key| modifier_mask(key))
+            .fold(0_u32, |mask, bit| mask | bit);
         for key in &keys[..keys.len() - 1] {
             self.key(key, true)?;
         }
+        if mask != 0 {
+            self.keyboard.modifiers(mask, 0, 0, 0);
+        }
         self.key(keys.last().unwrap(), true)?;
         self.key(keys.last().unwrap(), false)?;
+        if mask != 0 {
+            self.keyboard.modifiers(0, 0, 0, 0);
+        }
         for key in keys[..keys.len() - 1].iter().rev() {
             self.key(key, false)?;
         }
@@ -212,8 +227,26 @@ impl InputBackend {
         }
         self.flush()
     }
+    /// Event timestamp in the compositor's clock domain.
+    ///
+    /// Wayland input events carry CLOCK_MONOTONIC milliseconds. Measuring from
+    /// this process's start instead restarts the clock near zero on every
+    /// invocation, so a client that tracks event time — for key repeat, or to
+    /// drop stale events — sees it jump backwards and can ignore the keys
+    /// entirely. Terminals tend not to care; GUI toolkits do.
     fn time(&self) -> u32 {
-        self.started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32
+        let mut now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // Falls back to process-relative time only if the clock read fails.
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) } != 0 {
+            return self.started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
+        }
+        let millis = (now.tv_sec as i64)
+            .wrapping_mul(1_000)
+            .wrapping_add(now.tv_nsec as i64 / 1_000_000);
+        millis as u32
     }
     /// Push this batch to the compositor and drain everything it sent back.
     ///
@@ -277,6 +310,23 @@ fn install_keymap(
         .map_err(|error| InputError::Unavailable(error.to_string()))?;
     let _ = fs::remove_file(path);
     Ok(())
+}
+
+/// Bit for a modifier in the default XKB layout's modifier mask.
+///
+/// Indices are fixed by the standard keymap: Shift 0, Lock 1, Control 2,
+/// Mod1/Alt 3, Mod2/Num 4, Mod4/Super 6, Mod5/AltGr 7.
+fn modifier_mask(key: &str) -> Option<u32> {
+    match key.to_ascii_lowercase().as_str() {
+        "shift" | "lshift" | "rshift" => Some(1 << 0),
+        "caps" | "capslock" => Some(1 << 1),
+        "ctrl" | "control" | "lctrl" | "rctrl" => Some(1 << 2),
+        "alt" | "lalt" => Some(1 << 3),
+        "num" | "numlock" => Some(1 << 4),
+        "super" | "meta" | "logo" | "win" => Some(1 << 6),
+        "altgr" | "ralt" => Some(1 << 7),
+        _ => None,
+    }
 }
 
 fn evdev_key(key: &str) -> Option<u32> {
