@@ -33,14 +33,28 @@ impl Tmux {
     pub fn ensure(&self) -> Result<(), CoreError> {
         self.run(["start-server"])?;
         if self.run(["has-session", "-t", &self.session]).is_err() {
-            self.run(["new-session", "-d", "-s", &self.session])?;
+            // A detached session defaults to 80x24, which silently truncates
+            // captured output. Give it room so `pane read` returns full lines.
+            self.run([
+                "new-session",
+                "-d",
+                "-s",
+                &self.session,
+                "-x",
+                "200",
+                "-y",
+                "50",
+            ])?;
         }
         Ok(())
     }
     pub fn new_pane(&mut self, name: Option<&str>) -> Result<String, CoreError> {
         self.ensure()?;
+        // Each pane gets its own window rather than splitting the current one.
+        // Splitting subdivides a fixed area, so the fourth or fifth pane fails
+        // with "no space for a new pane"; windows are full-size and unbounded.
         let id = self.run([
-            "split-window",
+            "new-window",
             "-d",
             "-P",
             "-F",
