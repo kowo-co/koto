@@ -53,5 +53,5 @@ This is a live engineering checklist for `spec.md` v0.1.
 - [ ] Nested Hyprland seats.
 - [~] Btrfs checkpoints and rollback for explicitly configured subvolumes (`KOTO_BTRFS_SUBVOLUME`, `KOTO_BTRFS_SNAPSHOT_DIR`); automatic Omarchy layout discovery is pending.
 - [x] Excluded from the computer-use scope: `kotod`, leases, visible takeover indication, and remote take-over.
-- [ ] `libkoto` exposes parse and headless/eval execution over the C ABI.
+- [x] `libkoto` exposes parse and headless/eval execution over the C ABI.
 - [x] Omarchy stdlib generation covers normal bindings and generated CDP web-app macros.

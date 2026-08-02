@@ -692,6 +692,9 @@ name = "libkoto"
 version = "0.1.0"
 dependencies = [
  "koto-core",
+ "koto-hypr",
+ "koto-observe",
+ "koto-tmux",
 ]
 
 [[package]]
