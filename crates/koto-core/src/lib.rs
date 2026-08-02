@@ -714,6 +714,8 @@ pub enum CoreError {
     Unsupported(String),
     #[error("assertion failed: {0}")]
     Assertion(String),
+    #[error("execution aborted by kill switch")]
+    Aborted,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct Observation {
@@ -804,6 +806,8 @@ pub struct Vm<'a, B: Backend> {
     pub time_budget: Duration,
     pub default_timeout: Duration,
     pub registers: Registers,
+    /// A kill-switch marker checked before every instruction.
+    pub cancel_file: Option<std::path::PathBuf>,
 }
 impl<'a, B: Backend> Vm<'a, B> {
     pub fn run(&mut self, program: &Program) -> Result<Execution, CoreError> {
@@ -858,6 +862,9 @@ impl<'a, B: Backend> Vm<'a, B> {
         let mut calls = Vec::new();
         let mut operations = 0u32;
         while pc < program.instructions.len() {
+            if self.cancel_file.as_ref().is_some_and(|path| path.exists()) {
+                return Err(CoreError::Aborted);
+            }
             if operations >= self.op_budget {
                 return Err(CoreError::Budget("operations"));
             }
@@ -1432,6 +1439,7 @@ mod tests {
             time_budget: Duration::from_secs(1),
             default_timeout: Duration::from_secs(1),
             registers: Registers::default(),
+            cancel_file: None,
         }
     }
     #[test]

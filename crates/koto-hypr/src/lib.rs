@@ -72,6 +72,11 @@ impl HyprBackend {
         }
         Ok(self.input.as_mut().unwrap())
     }
+    pub fn release_held(&mut self) {
+        if let Some(input) = &self.input {
+            let _ = input.release_all();
+        }
+    }
     pub fn available() -> bool {
         Command::new("hyprctl")
             .arg("-j")

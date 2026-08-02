@@ -94,6 +94,11 @@ impl Default for Runtime {
         }
     }
 }
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        self.hypr.release_held();
+    }
+}
 impl Backend for Runtime {
     fn key(&mut self, keys: &[String]) -> Result<(), CoreError> {
         self.hypr.key(keys)
@@ -227,6 +232,16 @@ fn main() -> ExitCode {
     }
 }
 fn run(cli: Cli) -> Result<i32, CoreError> {
+    if cli.instruction.as_slice() == ["abort"] {
+        request_abort()?;
+        return Ok(0);
+    }
+    if cli.instruction.as_slice() == ["install-kill-switch"] {
+        install_kill_switch()?;
+        return Ok(0);
+    }
+    let marker = abort_path();
+    let _ = fs::remove_file(&marker);
     if cli.instruction.len() == 2 && cli.instruction[0] == "stdlib" && cli.instruction[1] == "sync"
     {
         sync_stdlib()?;
@@ -274,6 +289,7 @@ fn run(cli: Cli) -> Result<i32, CoreError> {
             .unwrap_or(cli.budget_time),
         default_timeout: cli.timeout,
         registers,
+        cancel_file: Some(abort_path()),
     };
     let execution = vm.run(&program)?;
     save_session(&cli.session, &execution.registers)?;
@@ -282,6 +298,41 @@ fn run(cli: Cli) -> Result<i32, CoreError> {
     }
     print_execution(&execution, cli.format, cli.seat);
     Ok(execution.registers.status)
+}
+fn abort_path() -> std::path::PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir())
+        .join("koto/abort")
+}
+fn request_abort() -> Result<(), CoreError> {
+    let path = abort_path();
+    fs::create_dir_all(path.parent().unwrap())
+        .map_err(|error| CoreError::Backend(error.to_string()))?;
+    fs::write(path, b"abort\n").map_err(|error| CoreError::Backend(error.to_string()))
+}
+fn install_kill_switch() -> Result<(), CoreError> {
+    let binding = "SUPER CTRL SHIFT, ESCAPE, exec, koto abort";
+    let status = std::process::Command::new("hyprctl")
+        .args(["keyword", "bind", binding])
+        .status()
+        .map_err(|error| CoreError::Backend(format!("hyprctl unavailable: {error}")))?;
+    if !status.success() {
+        return Err(CoreError::Backend(
+            "could not install Hyprland kill switch".into(),
+        ));
+    }
+    let config = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| ".".into())
+        .join(".config/hypr/koto.conf");
+    if let Some(parent) = config.parent() {
+        fs::create_dir_all(parent).map_err(|error| CoreError::Backend(error.to_string()))?;
+    }
+    fs::write(&config, format!("# managed by koto\nbind = {binding}\n"))
+        .map_err(|error| CoreError::Backend(error.to_string()))?;
+    println!("installed kill switch: SUPER+CTRL+SHIFT+ESC");
+    Ok(())
 }
 fn sync_stdlib() -> Result<(), CoreError> {
     let config = std::env::var_os("HOME")
@@ -589,6 +640,6 @@ fn exit_code(error: &CoreError) -> i32 {
         CoreError::SelectorAmbiguous(_) => 6,
         CoreError::ObservationUnavailable(_) => 7,
         CoreError::Backend(_) => 9,
-        CoreError::Unsupported(_) => 9,
+        CoreError::Unsupported(_) | CoreError::Aborted => 9,
     }
 }
