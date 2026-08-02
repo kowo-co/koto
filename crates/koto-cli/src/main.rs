@@ -263,10 +263,22 @@ impl Backend for Runtime {
                     image: None,
                 }
             } else {
-                koto_observe::atspi::observe()?.unwrap_or(self.hypr.observe(mode)?)
+                koto_observe::atspi::observe_focused(
+                    self.hypr
+                        .focused_window()
+                        .ok()
+                        .map(|window| window.pid as i32),
+                )?
+                .unwrap_or(self.hypr.observe(mode)?)
             }
         } else {
-            koto_observe::atspi::observe()?.unwrap_or(self.hypr.observe(mode)?)
+            koto_observe::atspi::observe_focused(
+                self.hypr
+                    .focused_window()
+                    .ok()
+                    .map(|window| window.pid as i32),
+            )?
+            .unwrap_or(self.hypr.observe(mode)?)
         };
         observation.image = image;
         Ok(observation)

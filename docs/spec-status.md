@@ -42,7 +42,7 @@ This is a live engineering checklist for `spec.md` v0.1.
 - [x] In-process wlr-screencopy PNG rung, `end image`/`end both`, and JSON image inlining.
 - [x] OCR instruction over the latest capture when Tesseract is installed.
 - [x] CDP accessibility snapshot is the automatic top observation-ladder rung once `web attach` is active.
-- [~] AT-SPI2 bounded structured-tree rung works globally; focused-window targeting is pending.
+- [x] AT-SPI2 bounded structured-tree rung prefers the focused application by PID.
 - [~] OCR uses the system Tesseract executable rather than an embedded engine.
 
 ## Safety, isolation, and integration

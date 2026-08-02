@@ -8,7 +8,7 @@ use koto_core::{CoreError, Observation};
 /// Collects a bounded textual projection of the accessibility tree. AT-SPI
 /// coverage is application-dependent, so an absent or empty tree simply lets
 /// the observation ladder continue to the next rung.
-pub fn observe() -> Result<Option<Observation>, CoreError> {
+pub fn observe_focused(pid: Option<i32>) -> Result<Option<Observation>, CoreError> {
     block_on(async {
         let connection = match AccessibilityConnection::new().await {
             Ok(connection) => connection,
@@ -17,6 +17,13 @@ pub fn observe() -> Result<Option<Observation>, CoreError> {
         let root = match connection.root_accessible_on_registry().await {
             Ok(root) => root,
             Err(_) => return Ok(None),
+        };
+        let root = if let Some(pid) = pid {
+            find_application(&root, connection.connection(), pid)
+                .await
+                .unwrap_or(root)
+        } else {
+            root
         };
         let mut lines = Vec::new();
         collect(&root, connection.connection(), 0, &mut lines).await;
@@ -33,6 +40,26 @@ pub fn observe() -> Result<Option<Observation>, CoreError> {
     })
 }
 
+async fn find_application<'a>(
+    root: &AccessibleProxy<'a>,
+    connection: &'a zbus::Connection,
+    pid: i32,
+) -> Option<AccessibleProxy<'a>> {
+    let children = root.get_children().await.ok()?;
+    for child in children {
+        let proxy = child.into_accessible_proxy(connection).await.ok()?;
+        let application = atspi_proxies::application::ApplicationProxy::builder(connection)
+            .destination(proxy.inner().destination().clone())
+            .ok()?
+            .build()
+            .await
+            .ok()?;
+        if application.id().await.ok()? == pid {
+            return Some(proxy);
+        }
+    }
+    None
+}
 async fn collect(
     proxy: &AccessibleProxy<'_>,
     connection: &zbus::Connection,
