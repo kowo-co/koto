@@ -31,7 +31,10 @@ pub struct Window {
     pub pid: i64,
     #[serde(default)]
     pub workspace: Workspace,
-    #[serde(default)]
+    // Hyprland spells this `focusHistoryID`. Without the rename serde never
+    // finds it, `default` makes it 0 for every window, and `focused` then
+    // matches all of them while `last` matches none.
+    #[serde(rename = "focusHistoryID", default)]
     pub focus_history_id: i64,
     #[serde(default)]
     pub at: [i32; 2],
