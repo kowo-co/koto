@@ -242,6 +242,18 @@ impl Backend for Runtime {
                 image,
             });
         }
+        if mode != ObserveMode::Image {
+            if let Some(web) = self.web.as_mut() {
+                if let Ok(Some(text)) = web.action("read", &[], Duration::from_secs(5)) {
+                    return Ok(Observation {
+                        source: "cdp".into(),
+                        fidelity: "exact, structured".into(),
+                        text: Some(text),
+                        image,
+                    });
+                }
+            }
+        }
         let mut observation = if let Ok(text) = self.tmux.read_active(None) {
             if !text.is_empty() {
                 Observation {
