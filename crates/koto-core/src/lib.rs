@@ -742,6 +742,7 @@ pub struct TraceEntry {
 #[derive(Debug, Clone, Serialize)]
 pub struct Execution {
     pub observation: Option<Observation>,
+    pub elapsed_ms: u128,
     pub registers: Registers,
     pub trace: Vec<TraceEntry>,
     pub halted: bool,
@@ -814,6 +815,7 @@ impl<'a, B: Backend> Vm<'a, B> {
         let started = std::time::Instant::now();
         let mut execution = Execution {
             observation: None,
+            elapsed_ms: 0,
             registers: self.registers.clone(),
             trace: Vec::new(),
             halted: false,
@@ -1017,6 +1019,7 @@ impl<'a, B: Backend> Vm<'a, B> {
             }
             pc = next;
         }
+        execution.elapsed_ms = started.elapsed().as_millis();
         Ok(execution)
     }
     fn execute(&mut self, op: &Op, execution: &mut Execution) -> Result<(), CoreError> {

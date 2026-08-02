@@ -576,10 +576,20 @@ fn print_execution(execution: &Execution, format: Format, seat: Seat) {
         }
         Format::Json => println!(
             "{}",
-            serde_json::json!({"status":"ok", "exit":0, "ops":execution.trace.len(), "seat":seat, "observation":execution.observation, "trace":execution.trace})
+            serde_json::json!({"status": if execution.registers.status == 0 { "ok" } else { "halted" }, "exit":execution.registers.status, "ops":execution.trace.len(), "elapsed_ms":execution.elapsed_ms, "seat":seat, "observation":execution.observation, "trace":execution.trace})
         ),
         Format::Agent => {
-            println!("#koto ok ops={} seat={:?}", execution.trace.len(), seat);
+            println!(
+                "#koto {} ops={} t={}ms seat={:?}",
+                if execution.registers.status == 0 {
+                    "ok"
+                } else {
+                    "halted"
+                },
+                execution.trace.len(),
+                execution.elapsed_ms,
+                seat
+            );
             if let Some(observation) = &execution.observation {
                 println!(
                     "source {} fidelity={}",
