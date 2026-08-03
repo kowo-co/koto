@@ -21,8 +21,15 @@ Useful globals: `--allow a,b` / `--deny a,b` (capabilities), `--timeout 10s`,
 `--budget-ops 256`, `--budget-time 120s`, `--format agent|json|raw|quiet`,
 `--observe auto|text|image|both`, `--dry-run`, `--explain`.
 
-Prefer **one script per tool call** over many inline calls. `end` is the only
-expensive instruction: forty instructions plus one `end` costs one observation.
+**Work inline, one step at a time.** Run a few instructions, end with `end
+image` (or `end text`), look at what came back, then decide the next call.
+Scripts are for flows you have already worked out and intend to repeat — not
+for finding your way around a page you have never seen. A script that guesses
+at six steps fails on step two and tells you nothing about why.
+
+`end` observes and stops the program; it does not tear down the world. The
+browser survives between invocations (see below), so the next call picks up
+exactly where this one stopped.
 
 ## Instruction set
 
@@ -34,7 +41,7 @@ expensive instruction: forty instructions plus one `end` costs one observation.
 | Window | `focus <sel>`, `ws <n\|+1\|-1\|prev>`, `send ws <n>`, `close [sel]`, `float`, `tile`, `full`, `pin`, `swap <l\|r\|u\|d>`, `move <l\|r\|u\|d>`, `monitor <name>`, `list <windows\|workspaces\|monitors\|clients>` |
 | Process | `spawn <cmd>...` (cap: spawn), `kill <sel\|scope>` |
 | Terminal | `pane new [name]`, `pane send "<text>"`, `pane run "<cmd>"`, `pane read [n]`, `pane wait <pat>`, `pane kill [name]` |
-| Web | `web attach [bw\|<browser>\|<sel>]` (cap: web), `web goto <url>`, `web click <ref\|css\|text=>`, `web fill <target> "<text>"`, `web read [full]`, `web wait <target>`, `web shot [name]`, `web eval "<js>"` (cap: web.eval), `web login <host>` (cap: web.login), `web download <url\|target> [to=<dir>]` (cap: web.download) |
+| Web | `web attach [bw\|<browser>\|<sel>]` (cap: web), `web goto <url>`, `web click <ref\|css\|text=>`, `web fill <target> "<text>"`, `web read [full]`, `web wait <target>`, `web shot [name]`, `web eval "<js>"` (cap: web.eval), `web login <host>` (cap: web.login), `web download <url\|target> [to=<dir>]` (cap: web.download). The session persists across invocations; `--web-stop` ends it. |
 | Flow | `.label:`, `jmp`, `jz`, `jnz`, `je <reg> <val> .label`, `rep <n>`, `while <pred> max <n>`, `call`, `ret`, `def`/`enddef`, `include` |
 | Guards | `require <cap>,...`, `assert <pred>`, `expect <pred>`, `budget ops <n>\|time <dur>` |
 | Meta | `note "<text>"`, `nop`, `halt [code]` |
@@ -44,18 +51,32 @@ Capabilities you may need in `require` / `--allow`: `input`, `window`, `spawn`,
 `pane run` requires `exec` — `spawn` alone is not enough — and `web eval`
 requires `web.eval` on top of `web`.
 
-## Web engines
+## Web engines and the persistent session
 
-`web attach` picks the engine. Bare (or a browser name) launches a managed
-Chromium over CDP in a koto-owned profile; a `title~` selector attaches an
-inherited `--remote-debugging-pipe`. **`web attach bw`** uses BetterWright
-(requires node + `npm i -g betterwright`): `web read` returns a pruned
-accessibility snapshot with `[ref=eN]` markers, and those refs work directly in
-`web click`/`web fill`/`web wait` — no CSS reverse-engineering. Refs are
-reassigned on every read and go stale when the page changes; re-read before
-acting. `web shot`, `web login`, and `web download` exist only on the bw
-engine. Prefer bw for real websites; it is the rung that works when a site
-ignores accessibility.
+`web attach` picks the engine, and the browser it opens **persists between koto
+invocations**. Navigate in one call, click in the next, fill a form in a third:
+the page stays where you left it. Only the first attach pays for a browser
+launch (~5s); the rest connect in about a second. `koto --web-status` reports
+the session, `koto --web-stop` closes it.
+
+Bare `web attach` (or `web attach <browser>`) drives Chrome over CDP in a
+koto-owned profile. `web attach bw` uses BetterWright (needs node and
+`npm i -g betterwright`): `web read` returns a pruned accessibility snapshot
+with `[ref=eN]` markers, and those refs work directly in `web click`/`web
+fill`/`web wait`. Refs are reassigned on every read and go stale when the page
+changes, so re-read before acting. `web shot`, `web login`, and `web download`
+exist only on the bw engine. The two engines keep separate profiles and
+separate logins.
+
+**Targets** for `web click`, `web fill`, and `web wait` are, in order of
+preference: `eN` (a ref from the last bw `web read`), `text=save draft` (matches
+the visible words on a button, link, or label — survives a class rename), or a
+CSS selector. A target that matches nothing is exit 3, never a silent no-op.
+
+Reach for `web eval` only when no instruction covers what you need. A flow
+written entirely in evals is a JavaScript program wearing koto as a hat: it
+gives up the observation ladder, the exit contract, and the capability gate,
+which are the reasons to use koto at all.
 
 ## Selectors
 
