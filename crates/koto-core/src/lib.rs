@@ -1118,7 +1118,7 @@ impl<'a, B: Backend> Vm<'a, B> {
             Op::Web { action, args } => {
                 match action.as_str() {
                     "eval" => self.require("web.eval")?,
-                    "login" => self.require("web.login")?,
+                    "login" | "creds" => self.require("web.login")?,
                     "download" => self.require("web.download")?,
                     _ => self.require("web")?,
                 }

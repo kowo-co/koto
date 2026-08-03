@@ -41,7 +41,7 @@ exactly where this one stopped.
 | Window | `focus <sel>`, `ws <n\|+1\|-1\|prev>`, `send ws <n>`, `close [sel]`, `float`, `tile`, `full`, `pin`, `swap <l\|r\|u\|d>`, `move <l\|r\|u\|d>`, `monitor <name>`, `list <windows\|workspaces\|monitors\|clients>` |
 | Process | `spawn <cmd>...` (cap: spawn), `kill <sel\|scope>` |
 | Terminal | `pane new [name]`, `pane send "<text>"`, `pane run "<cmd>"`, `pane read [n]`, `pane wait <pat>`, `pane kill [name]` |
-| Web | `web attach [bw\|<browser>\|<sel>]` (cap: web), `web goto <url>`, `web click <ref\|css\|text=>`, `web fill <target> "<text>"`, `web read [full]`, `web wait <target>`, `web shot [name]`, `web eval "<js>"` (cap: web.eval), `web login <host>` (cap: web.login), `web download <url\|target> [to=<dir>]` (cap: web.download). The session persists across invocations; `--web-stop` ends it. |
+| Web | `web attach [bw\|<browser>\|<sel>]` (cap: web), `web goto <url>`, `web back/forward/reload`, `web click <ref\|css\|text=> [newtab]`, `web type <target> "<text>" [append]`, `web fill <target> "<text>"`, `web scroll <n>`, `web hover <target>`, `web press <key>`, `web select <target> <value>`, `web read [full] [diff] [ref=eN] [selector=<css>] [urls]`, `web wait <target>`, `web shot [name] [annotate] [full] [kind=proof]`, `web pdf [name]`, `web open [url]` / `web use <tab>` / `web close [tab]` / `web pages`, `web overlays` / `web controls` / `web media`, `web dialog accept\|dismiss`, `web captcha solve\|inspect\|click\|drag\|text`, `web eval "<js>"` (cap: web.eval), `web login <host>` + `web creds ...` (cap: web.login), `web download <url\|target> [to=<dir>]` (cap: web.download), `web view start\|stop\|status`, `web handoff`, `web ask`, `web chat`, `web session close`. The session persists across invocations; `--web-stop` ends it. |
 | Flow | `.label:`, `jmp`, `jz`, `jnz`, `je <reg> <val> .label`, `rep <n>`, `while <pred> max <n>`, `call`, `ret`, `def`/`enddef`, `include` |
 | Guards | `require <cap>,...`, `assert <pred>`, `expect <pred>`, `budget ops <n>\|time <dur>` |
 | Meta | `note "<text>"`, `nop`, `halt [code]` |
@@ -53,25 +53,77 @@ requires `web.eval` on top of `web`.
 
 ## Web engines and the persistent session
 
-`web attach` picks the engine, and the browser it opens **persists between koto
+`web attach` picks the engine, and **both engines' browsers persist between koto
 invocations**. Navigate in one call, click in the next, fill a form in a third:
-the page stays where you left it. Only the first attach pays for a browser
-launch (~5s); the rest connect in about a second. `koto --web-status` reports
-the session, `koto --web-stop` closes it.
+the page, the tabs, and the scroll position stay where you left them. Only the
+first attach pays for a browser launch (~5s); the rest connect in about a
+second. `koto --web-status` reports both sessions, `koto --web-stop` closes
+them.
 
 Bare `web attach` (or `web attach <browser>`) drives Chrome over CDP in a
-koto-owned profile. `web attach bw` uses BetterWright (needs node and
-`npm i -g betterwright`): `web read` returns a pruned accessibility snapshot
-with `[ref=eN]` markers, and those refs work directly in `web click`/`web
-fill`/`web wait`. Refs are reassigned on every read and go stale when the page
-changes, so re-read before acting. `web shot`, `web login`, and `web download`
-exist only on the bw engine. The two engines keep separate profiles and
-separate logins.
+koto-owned profile and supports only goto/read/click/fill/wait/eval. `web
+attach bw` uses BetterWright 1.6.3 (needs node and `npm i -g
+betterwright@1.6.3`; an older install is refused at attach) and exposes the
+whole engine, one koto action per betterwright function. Attach options:
+`profile=<name>` (separate cookie jar), `session=<name>` (parallel lane in one
+browser), `platform=linux|macos|windows` (identity fingerprint; koto defaults
+to linux so the headed browser renders at host scale instead of
+betterwright's 2x-Retina macOS default).
 
-**Targets** for `web click`, `web fill`, and `web wait` are, in order of
-preference: `eN` (a ref from the last bw `web read`), `text=save draft` (matches
-the visible words on a button, link, or label — survives a class rename), or a
-CSS selector. A target that matches nothing is exit 3, never a silent no-op.
+- **Every action answers "where am I now".** Success returns a
+  `page <id> <url> "<title>"` line; `type`/`fill` also echo the field's actual
+  value (passwords redact). A missed target returns the page it missed on,
+  the nearest live candidates with refs, and a `help:` line — read the error
+  before re-reading the page; it usually already contains your next target.
+- **Read before acting.** `web read` is `snapshot({interactive:true})` — a
+  pruned accessibility tree with `[ref=eN]` markers that work directly as
+  targets. `full` reads content wholesale, `diff` shows only what changed since
+  the last same-shaped read, `ref=eN`/`selector=<css>` scope to a subtree,
+  `urls` keeps link hrefs. Refs are reassigned on every read and go stale when
+  the page changes, so re-read before acting. A scoped read needs to match
+  exactly one element: too many is exit 6, none is exit 3, and both errors name
+  the fix. Escalate `read` → `read full` →
+  `shot annotate` (boxes every interactive element with its ref) only as far as
+  the question needs.
+- **Visible actions are human-shaped.** `web click`, `web type`, and `web
+  scroll` run betterwright's `human.*` helpers (curved pointer, bounded key
+  timing). `web fill` is the precise, instant `locator.fill` for when shaping
+  does not matter. `web press`/`web hover`/`web select` cover keys, hovers, and
+  dropdowns.
+- **Tabs are a session, and the session outlives the invocation.** `web open
+  [url]`, `web use <tab>`, `web close`, `web pages`; `web click <link> newtab`
+  Ctrl+clicks a link into a background tab and returns the new tab's summary.
+  Tabs and the current page survive between koto runs until `--web-stop`, so a
+  later invocation can `web read` or `web click` without re-navigating. Refs
+  (`eN`) are the exception — they go stale on any page change, so re-read.
+- **Verify, don't infer.** `web overlays` dismisses cookie/promo layers,
+  `web controls` reports exact form-control state, `web media` reports what is
+  actually playing. `web dialog accept|dismiss` arms the next JS dialog before
+  the click that triggers it.
+- **Challenges are resumable.** Results carry `#challenge`/`#warn` trailer
+  lines. `web captcha solve` runs the local solver; `inspect`/`click`/`drag`/
+  `text` (CSS-pixel bounds) handle the vision stages. Never repeat a failed
+  stage — after a rejection, switch source or take `web handoff`.
+- **Credentials never surface.** `web login <host>` fills a vaulted secret;
+  `web creds list/inspect/fill/generate/pending/commit/discard` manage the
+  vault by metadata only. Commit a generated password only after the site
+  visibly accepts it; discard on failure.
+- **A human is one command away.** `web view start` prints a live-view URL,
+  `web handoff "check the cart" timeout=600` blocks until the human clicks
+  Done, `web ask "which color?" options=red|blue` waits for a typed answer,
+  `web chat` drains their freeform guidance between steps.
+
+The two engines keep separate profiles and separate logins.
+
+**Targets** for `web click`, `web type`, `web fill`, `web hover`, `web select`,
+and `web wait` are, in order of preference: `eN` (a ref from the last bw `web
+read`), `text=save draft` (matches the visible words on a button, link, or
+label — survives a class rename), or a CSS selector. A target that matches
+nothing is exit 3, never a silent no-op.
+
+`web eval` runs in betterwright's **worker**, not the page — there is no
+`document`. Its globals are `page`, `pages`, `snapshot`, `human`, `credentials`;
+reach the DOM through `page.evaluate(() => document…)`.
 
 Reach for `web eval` only when no instruction covers what you need. A flow
 written entirely in evals is a JavaScript program wearing koto as a hat: it

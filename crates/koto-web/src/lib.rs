@@ -4,7 +4,7 @@ mod bw;
 mod cdp;
 pub mod session;
 
-pub use bw::{BwWorker, map_bw_error};
+pub use bw::{BwWorker, bw_socket_path, daemon_status, map_bw_error, stop_daemon};
 pub use cdp::{Browser, Cdp};
 
 use koto_core::CoreError;
@@ -22,32 +22,55 @@ pub enum AttachSpec {
     Bw {
         profile: Option<String>,
         session: Option<String>,
+        /// Identity platform for the fingerprint. Defaults to "linux" so a
+        /// headed browser on this desktop renders at the host's scale —
+        /// betterwright's own default is a 2x-Retina macOS capture.
+        platform: Option<String>,
     },
 }
 
+/// Actions that exist only on the BetterWright engine; the CDP engine keeps
+/// its original goto/read/eval/click/fill/wait surface.
+const BW_ONLY: &[&str] = &[
+    "shot", "login", "download", "open", "use", "close", "pages", "back", "forward", "reload",
+    "type", "scroll", "hover", "press", "select", "pdf", "overlays", "controls", "media", "dialog",
+    "captcha", "creds", "view", "handoff", "ask", "chat", "session",
+];
+
 static BW_KV: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"^(profile|session)=(.+)$").unwrap());
+    LazyLock::new(|| regex::Regex::new(r"^(profile|session|platform)=(.+)$").unwrap());
 
 pub fn parse_attach(args: &[String]) -> Result<AttachSpec, CoreError> {
     let Some(first) = args.first() else {
         return Ok(AttachSpec::LaunchDefault);
     };
     if first == "bw" || first == "betterwright" {
-        let (mut profile, mut session) = (None, None);
+        let (mut profile, mut session, mut platform) = (None, None, None);
         for arg in &args[1..] {
             let caps = BW_KV.captures(arg).ok_or_else(|| {
                 CoreError::Parse(format!(
-                    "web attach bw: expected profile=<p> or session=<s>, got `{arg}`"
+                    "web attach bw: expected profile=<p>, session=<s>, or platform=<p>, got `{arg}`"
                 ))
             })?;
             let value = caps[2].to_owned();
-            if &caps[1] == "profile" {
-                profile = Some(value);
-            } else {
-                session = Some(value);
+            match &caps[1] {
+                "profile" => profile = Some(value),
+                "session" => session = Some(value),
+                _ => {
+                    if !matches!(value.as_str(), "linux" | "macos" | "windows") {
+                        return Err(CoreError::Parse(format!(
+                            "web attach bw: platform must be linux, macos, or windows, got `{value}`"
+                        )));
+                    }
+                    platform = Some(value);
+                }
             }
         }
-        return Ok(AttachSpec::Bw { profile, session });
+        return Ok(AttachSpec::Bw {
+            profile,
+            session,
+            platform,
+        });
     }
     if args.len() > 1 {
         return Err(CoreError::Parse(
@@ -68,9 +91,15 @@ pub fn attach(spec: AttachSpec) -> Result<WebEngine, CoreError> {
         AttachSpec::InheritedPipe(selector) => {
             WebEngine::Cdp(Cdp::attach_inherited(Some(&selector))?)
         }
-        AttachSpec::Bw { profile, session } => {
-            WebEngine::Bw(BwWorker::spawn(profile.as_deref(), session.as_deref())?)
-        }
+        AttachSpec::Bw {
+            profile,
+            session,
+            platform,
+        } => WebEngine::Bw(BwWorker::spawn(
+            profile.as_deref(),
+            session.as_deref(),
+            Some(platform.as_deref().unwrap_or("linux")),
+        )?),
     })
 }
 
@@ -82,10 +111,8 @@ impl WebEngine {
         timeout: Duration,
     ) -> Result<Option<String>, CoreError> {
         match self {
-            Self::Cdp(cdp) => match action {
-                "shot" | "login" | "download" => Err(needs_bw(action)),
-                _ => cdp.action(action, args, timeout),
-            },
+            Self::Cdp(_) if BW_ONLY.contains(&action) => Err(needs_bw(action)),
+            Self::Cdp(cdp) => cdp.action(action, args, timeout),
             Self::Bw(worker) => worker.action(action, args, timeout),
         }
     }
@@ -130,18 +157,25 @@ mod tests {
             parse_attach(&args(&["bw"])).unwrap(),
             AttachSpec::Bw {
                 profile: None,
-                session: None
+                session: None,
+                platform: None
             }
         );
         assert_eq!(
-            parse_attach(&args(&["betterwright", "profile=work", "session=s1"])).unwrap(),
+            parse_attach(&args(&["betterwright", "profile=work", "session=s1", "platform=macos"]))
+                .unwrap(),
             AttachSpec::Bw {
                 profile: Some("work".into()),
-                session: Some("s1".into())
+                session: Some("s1".into()),
+                platform: Some("macos".into())
             }
         );
         assert!(matches!(
             parse_attach(&args(&["bw", "bogus=1"])),
+            Err(CoreError::Parse(_))
+        ));
+        assert!(matches!(
+            parse_attach(&args(&["bw", "platform=amiga"])),
             Err(CoreError::Parse(_))
         ));
         assert!(matches!(

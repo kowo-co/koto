@@ -195,17 +195,49 @@ Two engines: CDP over `--remote-debugging-pipe`, to a koto-launched browser or a
 
 ```
 web attach <target>         ; requires cap: web
-web attach bw [profile=<p>] [session=<s>]   ; BetterWright engine, alias `betterwright`
+web attach bw [profile=<p>] [session=<s>] [platform=linux|macos|windows]
+                            ; BetterWright engine, alias `betterwright`. platform picks the
+                            ; identity fingerprint and defaults to linux so a headed browser
+                            ; renders at host scale — betterwright's own default is a
+                            ; 2x-Retina macOS capture that doubles every pixel on this desktop.
 web goto  <url>
-web click <css|text=>
-web fill  <css> "<text>"
-web read  [css|full]        ; accessibility tree by default, not innerText
+web back | forward | reload
+web click <css|text=|ref> [newtab]  ; bw: human.click — shaped pointer movement.
+                            ; newtab is a Ctrl+click: opens the link in a background
+                            ; tab, waits for it to appear in pages, returns its summary
+web type  <target> "<text>" [append]        ; bw only: human.type
+web fill  <css> "<text>"    ; precise locator.fill, no human shaping
+web scroll <deltaY>         ; bw only: human.scroll, negative is up
+web hover <target>          ; bw only
+web press <key>             ; bw only: page.keyboard.press
+web select <target> <value...>              ; bw only: locator.selectOption
+web read  [full] [diff] [ref=eN] [selector=<css>] [depth=<n>] [urls] [max=<n>]
 web wait  <css|url~>
 web eval  "<js>"            ; requires cap: web.eval
-web shot  [name]            ; page screenshot into the observation dir, path in $out
+web shot  [name] [annotate] [full] [jpeg] [kind=proof|question|debug] [quality=<n>]
+web pdf   [name]            ; bw only: page.pdf into the artifact dir
+web open  [url]             ; bw only: openPage — new tab in this session
+web use   <id|index>        ; bw only: usePage
+web close [id|index]        ; bw only: closePage (current tab if omitted)
+web pages                   ; bw only: list this session's open tabs
+web overlays                ; bw only: overlays.dismiss() — cookie/promo layers
+web controls                ; bw only: controls.inspect() — exact form-control state
+web media                   ; bw only: media.inspect() — video/audio playback state
+web dialog accept ["text"] | dismiss        ; bw only: arm the next JS dialog
+web captcha solve | inspect [x y w h] | click <x y w h> | drag <x1 y1 x2 y2 [steps]> | text [x y w h]
 web login <host> [user=<name>]        ; requires cap: web.login
+web creds list [text=|category=] | inspect | fill [id=|user=] [nosubmit]
+          | generate [user=] [nosubmit] | pending | commit <id> | discard <id>
+                            ; requires cap: web.login; metadata only, secrets never surface
 web download <url|target> [to=<dir>]  ; requires cap: web.download
+web view  start [expose=lan|local|tailscale] [port=<n>] | stop | status
+web handoff [prompt words] [timeout=<s>]    ; block until a human clicks Done/Cancel
+web ask   <question words> [options=a|b|c] [timeout=<s>]
+web chat  [post <words>]    ; drain human chat, or post an agent line
+web session close           ; close this session's tabs and state, keep the browser
 ```
+
+On the `bw` engine, output is expressive in both directions. Every state-changing action succeeds with a `page <id> <url> "<title>"` state line (so the agent always knows where it landed without a follow-up read), `type`/`fill` additionally echo the field's post-action value (`[redacted]` for password inputs), and `web pages` lists one line per tab with `*` on the current one. A missed target fails with a Rust-shaped diagnosis: the original error, the page it happened on, the nearest interactive candidates from a fresh snapshot (or the page's actionables when nothing is close), and a `help:` line — the error embeds the observation the agent would otherwise spend a turn fetching.
 
 `web read` returns the CDP accessibility snapshot, which is structurally closer to what a screen reader sees than to raw DOM, and is much cheaper in tokens. On the `bw` engine it returns a pruned snapshot carrying `[ref=eN]` handles instead; `full` drops the diff against the previous read and raises the character cap, which is bigger and rarely what you want.
 
@@ -215,7 +247,9 @@ web download <url|target> [to=<dir>]  ; requires cap: web.download
 
 Managed CDP launches drive the user's `google-chrome-stable`, falling back to `chromium`, against a persistent koto-owned data dir at `$XDG_STATE_HOME/koto/chrome`. Chrome 136 and later refuse a debugging pipe on the default profile, so this is not a preference: sign into the koto profile once and Chrome Sync carries the identity forward. The daily profile is never driven.
 
-The `betterwright` engine is a runtime-optional dependency: node 22 or newer plus `npm i -g betterwright`, or `KOTO_BETTERWRIGHT_DIR` pointing at an install. Absent, `web attach bw` exits 9 at attach, never at parse.
+Both engines keep a browser alive between invocations. The `bw` engine's sidecar runs as a detached daemon listening on `$XDG_RUNTIME_DIR/koto/bw.sock`; `web attach bw` connects to it, or starts it if it is not running, and re-attaching to a live daemon keeps its pages rather than replacing them. Disconnecting is not closing — only `--web-stop` (or a signal) ends the browser, and `--web-status` reports both engines. A dead daemon leaves a socket file behind, which is litter rather than a session: the next attach removes it and starts fresh.
+
+The `betterwright` engine is a runtime-optional dependency: node 22 or newer plus `npm i -g betterwright@1.6.3`, or `KOTO_BETTERWRIGHT_DIR` pointing at an install. The engine tracks betterwright 1.6.3 command-for-function — every `web` action above the CDP set maps onto exactly one function of its browser API (`human.*`, `snapshot`, `screenshot`, `openPage`/`usePage`/`closePage`, `overlays`/`controls`/`media`/`dialogs`, `captcha.*`, `credentials.*`) or one method of its host client (`startLiveView`, `waitForHandoff`, `waitForAsk`, `liveViewPostChat`/`liveViewDrainChat`, `closeSession`) — and an older install is refused at attach with an upgrade hint. Absent entirely, `web attach bw` exits 9 at attach, never at parse.
 
 ### 4.10 Control flow
 
@@ -460,9 +494,9 @@ Ship order: Arch/Hyprland, then Debian family, then macOS if there is demand, th
 | `window` | focus, ws, close, move, float |
 | `spawn` | spawn |
 | `exec` | pane run, anything reaching a shell |
-| `web` | web attach, goto, click, fill, read, shot |
+| `web` | web attach, goto, click, fill, read, shot, and every other web action not gated below |
 | `web.eval` | web eval |
-| `web.login` | web login |
+| `web.login` | web login, web creds |
 | `web.download` | web download |
 | `fs` | checkpoint, rollback |
 | `takeover` | lease acquisition (§11) |

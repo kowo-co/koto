@@ -362,19 +362,23 @@ fn run(cli: Cli) -> Result<i32, CoreError> {
         return Ok(0);
     }
     if cli.web_stop {
-        let stopped = koto_web::session::stop()?;
+        // Both engines keep a browser alive between invocations; stop both.
+        let cdp = koto_web::session::stop()?;
+        let bw = koto_web::stop_daemon()?;
         println!(
             "{}",
-            if stopped {
-                "browser session stopped"
-            } else {
-                "no browser session"
+            match (cdp, bw) {
+                (false, false) => "no browser session".to_owned(),
+                (true, false) => "browser session stopped".to_owned(),
+                (false, true) => "betterwright browser stopped".to_owned(),
+                (true, true) => "browser session and betterwright browser stopped".to_owned(),
             }
         );
         return Ok(0);
     }
     if cli.web_status {
         println!("{}", koto_web::session::status());
+        println!("{}", koto_web::daemon_status());
         return Ok(0);
     }
     // Seat management runs before any program: these manipulate the seat rather
