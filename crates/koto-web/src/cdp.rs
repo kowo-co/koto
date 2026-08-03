@@ -36,6 +36,10 @@ impl Cdp {
                 "--remote-debugging-pipe",
                 "--no-first-run",
                 "--no-default-browser-check",
+                // Unwrapped binaries (e.g. /opt/google/chrome/chrome) never read
+                // the distro flags conf; without this they pick X11 under a
+                // Wayland session and the compositor scales the buffer.
+                "--ozone-platform-hint=auto",
             ])
             .arg(format!("--user-data-dir={}", data_dir.display()))
             .arg("about:blank")
