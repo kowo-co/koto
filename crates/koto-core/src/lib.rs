@@ -317,7 +317,18 @@ fn parse_inline_mnemonic(tokens: &[String]) -> Result<(Op, usize), String> {
         "type" => Ok((Op::Type(arg(1)?.into()), 2)),
         "paste" => Ok((Op::Paste(arg(1)?.into()), 2)),
         "focus" => Ok((Op::Focus(arg(1)?.into()), 2)),
-        "wait" => Ok((Op::Wait(parse_wait(&tokens[1..])?), tokens.len())),
+        "wait" => {
+            // `wait` ends where the next instruction begins, like every other
+            // non-chord mnemonic. Swallowing the rest of argv turned
+            // `wait 5s web goto ...` into a wait whose kind was "5s".
+            let consumed = tokens
+                .iter()
+                .skip(1)
+                .position(|token| is_mnemonic(token) && token != "window")
+                .map(|index| index + 1)
+                .unwrap_or(tokens.len());
+            Ok((Op::Wait(parse_wait(&tokens[1..consumed])?), consumed))
+        }
         "see" => {
             let first = tokens.get(1).map(String::as_str);
             let (register, mode, used) = match first {
@@ -344,11 +355,16 @@ fn parse_inline_mnemonic(tokens: &[String]) -> Result<(Op, usize), String> {
             // Inline mode is an argv token stream. For every mnemonic whose
             // operand list is not a chord, the next mnemonic starts the next
             // instruction. Quotes have already been preserved by argv.
+            // `web` and `pane` take an action word first, and several of those
+            // actions (click, wait, read) are mnemonics in their own right.
+            // Skip past the action before hunting for the next instruction, or
+            // `web click ".x"` parses as a bare `web`.
+            let skip = if matches!(word, "web" | "pane") { 2 } else { 1 };
             let consumed = tokens
                 .iter()
-                .skip(1)
+                .skip(skip)
                 .position(|token| is_mnemonic(token))
-                .map(|index| index + 1)
+                .map(|index| index + skip)
                 .unwrap_or(tokens.len());
             let op = parse_tokens(&tokens[..consumed])?;
             Ok((op, consumed))

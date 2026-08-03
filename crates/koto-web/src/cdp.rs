@@ -11,13 +11,19 @@ use std::{
 };
 
 pub struct Cdp {
-    child: Option<Child>,
     write: UnixStream,
     read: BufReader<UnixStream>,
     next: u64,
     session: String,
 }
-impl Cdp {
+/// The browser process itself, owned by the session holder. It hands out the
+/// raw pipe ends; framing and protocol are the client's problem.
+pub struct Browser {
+    child: Child,
+    write: Option<UnixStream>,
+    read: Option<UnixStream>,
+}
+impl Browser {
     pub fn launch(browser: Option<&str>) -> Result<Self, CoreError> {
         let (parent_write, child_read) = UnixStream::pair().map_err(ioerr)?;
         let (child_write, parent_read) = UnixStream::pair().map_err(ioerr)?;
@@ -63,24 +69,83 @@ impl Cdp {
             .map_err(|error| CoreError::Backend(format!("launch {browser}: {error}")))?;
         drop(child_read);
         drop(child_write);
-        parent_read
-            .set_read_timeout(Some(Duration::from_secs(10)))
+        Ok(Self {
+            child,
+            write: Some(parent_write),
+            read: Some(parent_read),
+        })
+    }
+    pub fn writer(&mut self) -> Result<UnixStream, CoreError> {
+        self.write
+            .as_ref()
+            .ok_or_else(|| CoreError::Backend("browser pipe is gone".into()))?
+            .try_clone()
+            .map_err(ioerr)
+    }
+    pub fn reader(&mut self) -> Result<UnixStream, CoreError> {
+        self.read
+            .as_ref()
+            .ok_or_else(|| CoreError::Backend("browser pipe is gone".into()))?
+            .try_clone()
+            .map_err(ioerr)
+    }
+    pub fn exited(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(Some(_)))
+    }
+}
+impl Drop for Browser {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Cdp {
+    /// Joins the persistent session, adopting the page it already has open so
+    /// a run continues where the last one stopped. Only opens a fresh tab when
+    /// the session has none.
+    pub fn connect(browser: Option<&str>) -> Result<Self, CoreError> {
+        let stream = crate::session::connect_or_start(browser)?;
+        let read = stream.try_clone().map_err(ioerr)?;
+        // Answers to the previous client's last questions can still be in
+        // flight. Swallow them before asking anything, and number requests
+        // from a per-process base so a stale frame can never be mistaken for
+        // this run's reply.
+        read.set_read_timeout(Some(Duration::from_millis(120)))
+            .map_err(ioerr)?;
+        let mut drain = BufReader::new(read.try_clone().map_err(ioerr)?);
+        let mut scratch = Vec::new();
+        while drain.read_until(0, &mut scratch).is_ok_and(|count| count > 0) {
+            scratch.clear();
+        }
+        read.set_read_timeout(Some(Duration::from_secs(15)))
             .map_err(ioerr)?;
         let mut cdp = Self {
-            child: Some(child),
-            write: parent_write,
-            read: BufReader::new(parent_read),
-            next: 1,
+            write: stream,
+            read: BufReader::new(read),
+            next: u64::from(std::process::id() % 2000) * 1000 + 1,
             session: String::new(),
         };
-        let target = cdp.request(
-            "Target.createTarget",
-            json!({"url":"about:blank","newWindow":true}),
-            None,
-        )?["result"]["targetId"]
-            .as_str()
-            .ok_or_else(|| CoreError::Backend("CDP did not create a target".into()))?
-            .to_owned();
+        let target = match cdp.existing_page()? {
+            Some(id) => id,
+            None => {
+                // Nothing open means this session is new. Creating the first
+                // window is also what prompts a profile to restore its old
+                // tabs, so give them a moment to appear and then throw them
+                // out: a fresh session starts with one tab, ours.
+                let id = cdp.request(
+                    "Target.createTarget",
+                    json!({"url":"about:blank","newWindow":true}),
+                    None,
+                )?["result"]["targetId"]
+                    .as_str()
+                    .ok_or_else(|| CoreError::Backend("CDP did not create a target".into()))?
+                    .to_owned();
+                std::thread::sleep(Duration::from_millis(600));
+                cdp.close_other_targets(&id)?;
+                id
+            }
+        };
         cdp.session = cdp.request(
             "Target.attachToTarget",
             json!({"targetId":target,"flatten":true}),
@@ -89,11 +154,6 @@ impl Cdp {
             .as_str()
             .ok_or_else(|| CoreError::Backend("CDP did not attach to target".into()))?
             .to_owned();
-        // A profile with saved session state restores its old tabs into the
-        // window we just made. They are not ours to drive and they accumulate
-        // run after run, so close everything except the target we created.
-        // Only safe here: a browser we launched is a browser we own.
-        cdp.close_other_targets(&target)?;
         cdp.enable_page()
     }
     fn close_other_targets(&mut self, keep: &str) -> Result<(), CoreError> {
@@ -112,6 +172,21 @@ impl Cdp {
             let _ = self.request("Target.closeTarget", json!({"targetId":id}), None);
         }
         Ok(())
+    }
+    /// The page this session is already on, if any. A profile that restores
+    /// old tabs can offer several; the most recently created one is the one a
+    /// previous run was driving.
+    fn existing_page(&mut self) -> Result<Option<String>, CoreError> {
+        let targets = self.request("Target.getTargets", json!({}), None)?["result"]["targetInfos"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        Ok(targets
+            .iter()
+            .filter(|target| target["type"].as_str() == Some("page"))
+            .filter_map(|target| target["targetId"].as_str())
+            .next_back()
+            .map(str::to_owned))
     }
     /// Attaches a live browser whose parent passed read/write pipe ends as
     /// fd 3 and fd 4, as Chromium specifies for `--remote-debugging-pipe`.
@@ -140,7 +215,6 @@ impl Cdp {
         read.set_read_timeout(Some(Duration::from_secs(10)))
             .map_err(ioerr)?;
         let mut cdp = Self {
-            child: None,
             write,
             read: BufReader::new(read),
             next: 1,
@@ -220,18 +294,36 @@ impl Cdp {
             "goto" => { self.call("Page.navigate", json!({"url": need(args, "web goto")?}))?; Ok(None) }
             "read" => Ok(Some(self.call("Accessibility.getFullAXTree", json!({"depth": -1}))?.to_string())),
             "eval" => Ok(Some(self.call("Runtime.evaluate", json!({"expression":need(args,"web eval")?,"returnByValue":true,"awaitPromise":true}))?["result"]["result"]["value"].to_string())),
-            "click" => { let selector = need(args,"web click")?; self.evaluate(&format!("document.querySelector({selector:?})?.click()"))?; Ok(None) }
-            "fill" => { let selector = need(args,"web fill")?; let value = args.get(1).ok_or_else(|| CoreError::Parse("web fill needs text".into()))?; self.evaluate(&format!("(()=>{{const e=document.querySelector({selector:?});if(!e)throw Error('selector not found');e.value={value:?};e.dispatchEvent(new Event('input',{{bubbles:true}}));}})()"))?; Ok(None) }
-            "wait" => { let selector = need(args,"web wait")?; let start=Instant::now(); while start.elapsed()<timeout { if self.evaluate(&format!("!!document.querySelector({selector:?})"))? == "true" { return Ok(None); } std::thread::sleep(Duration::from_millis(50)); } Err(CoreError::Timeout(format!("web wait {selector}"))) }
+            "click" => { let selector = need(args,"web click")?; let find = locator(selector); self.evaluate(&format!("(()=>{{const e={find};if(!e)throw Error('selector not found');e.click();}})()"))?; Ok(None) }
+            // React and friends install their own `value` setter and ignore a
+            // plain assignment, so the text lands in the DOM and never reaches
+            // the app's state: the form looks filled and saves empty. Drive the
+            // prototype setter the way a keystroke would.
+            "fill" => { let selector = need(args,"web fill")?; let value = args.get(1).ok_or_else(|| CoreError::Parse("web fill needs text".into()))?; let find = locator(selector); self.evaluate(&format!("(()=>{{const e={find};if(!e)throw Error('selector not found');const p=e instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;const d=Object.getOwnPropertyDescriptor(p,'value');if(d&&d.set)d.set.call(e,{value:?});else e.value={value:?};e.dispatchEvent(new Event('input',{{bubbles:true}}));e.dispatchEvent(new Event('change',{{bubbles:true}}));}})()"))?; Ok(None) }
+            "wait" => { let selector = need(args,"web wait")?; let start=Instant::now(); while start.elapsed()<timeout { if self.evaluate(&format!("!!({})", locator(selector)))? == "true" { return Ok(None); } std::thread::sleep(Duration::from_millis(50)); } Err(CoreError::Timeout(format!("web wait {selector}"))) }
             _ => Err(CoreError::Parse(format!("unknown web action `{action}`"))),
         }
     }
+    /// A thrown exception is a failed instruction, not a quiet `undefined`.
+    /// CDP reports it in the envelope rather than as a protocol error, so it
+    /// has to be dug out by hand or every miss looks like success.
     fn evaluate(&mut self, expression: &str) -> Result<String, CoreError> {
-        Ok(self.call(
+        let response = self.call(
             "Runtime.evaluate",
             json!({"expression":expression,"returnByValue":true,"awaitPromise":true}),
-        )?["result"]["result"]["value"]
-            .to_string())
+        )?;
+        if let Some(details) = response["result"].get("exceptionDetails") {
+            let message = details["exception"]["description"]
+                .as_str()
+                .or_else(|| details["text"].as_str())
+                .unwrap_or("script threw");
+            return Err(if message.contains("selector not found") {
+                CoreError::SelectorNotFound(message.into())
+            } else {
+                CoreError::Backend(format!("web eval: {message}"))
+            });
+        }
+        Ok(response["result"]["result"]["value"].to_string())
     }
     fn call(&mut self, method: &str, params: Value) -> Result<Value, CoreError> {
         let session = self.session.clone();
@@ -276,26 +368,17 @@ impl Cdp {
         }
     }
 }
-/// A browser this process launched dies with the program; the pipe closing
-/// does not make Chromium exit on its own, and orphaned windows pile up run
-/// after run. An inherited pipe belongs to someone else's browser and is
-/// left alone.
-impl Drop for Cdp {
-    fn drop(&mut self) {
-        if self.child.is_none() {
-            return;
+/// Resolves a web target to a JS expression. `text=` matches an element by the
+/// words a person would read on it, which survives a class-name change and is
+/// often the only handle a component library leaves behind. Anything else is
+/// CSS.
+fn locator(target: &str) -> String {
+    match target.strip_prefix("text=") {
+        Some(text) => {
+            let text = text.trim();
+            format!("Array.from(document.querySelectorAll('button,a,[role=button],input[type=submit],label,summary')).find(e=>(e.textContent||e.value||'').trim()==={text:?})")
         }
-        let _ = self.request("Browser.close", json!({}), None);
-        if let Some(child) = self.child.as_mut() {
-            for _ in 0..20 {
-                match child.try_wait() {
-                    Ok(Some(_)) => return,
-                    _ => std::thread::sleep(Duration::from_millis(100)),
-                }
-            }
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        None => format!("document.querySelector({target:?})"),
     }
 }
 fn default_browser() -> String {

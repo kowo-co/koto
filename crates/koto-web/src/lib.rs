@@ -2,9 +2,10 @@
 //! engine driven through a node sidecar.
 mod bw;
 mod cdp;
+pub mod session;
 
 pub use bw::{BwWorker, map_bw_error};
-pub use cdp::Cdp;
+pub use cdp::{Browser, Cdp};
 
 use koto_core::CoreError;
 use std::{path::PathBuf, sync::LazyLock, time::Duration};
@@ -62,8 +63,8 @@ pub fn parse_attach(args: &[String]) -> Result<AttachSpec, CoreError> {
 
 pub fn attach(spec: AttachSpec) -> Result<WebEngine, CoreError> {
     Ok(match spec {
-        AttachSpec::LaunchDefault => WebEngine::Cdp(Cdp::launch(None)?),
-        AttachSpec::LaunchBrowser(browser) => WebEngine::Cdp(Cdp::launch(Some(&browser))?),
+        AttachSpec::LaunchDefault => WebEngine::Cdp(Cdp::connect(None)?),
+        AttachSpec::LaunchBrowser(browser) => WebEngine::Cdp(Cdp::connect(Some(&browser))?),
         AttachSpec::InheritedPipe(selector) => {
             WebEngine::Cdp(Cdp::attach_inherited(Some(&selector))?)
         }

@@ -50,6 +50,15 @@ struct Cli {
     /// Print the persistent nested seat's state and exit.
     #[arg(long)]
     seat_status: bool,
+    /// Close the persistent browser session and exit.
+    #[arg(long)]
+    web_stop: bool,
+    /// Print the persistent browser session's state and exit.
+    #[arg(long)]
+    web_status: bool,
+    /// Run as the browser session holder. Started on demand; not for humans.
+    #[arg(long, hide = true)]
+    web_session_holder: bool,
     #[arg(long, default_value = "default")]
     session: String,
     #[arg(long, default_value = "default")]
@@ -345,6 +354,29 @@ fn main() -> ExitCode {
     }
 }
 fn run(cli: Cli) -> Result<i32, CoreError> {
+    // The browser session outlives any single run, so managing it happens
+    // before a program exists.
+    if cli.web_session_holder {
+        koto_web::session::write_pid();
+        koto_web::session::serve(cli.instruction.first().map(String::as_str))?;
+        return Ok(0);
+    }
+    if cli.web_stop {
+        let stopped = koto_web::session::stop()?;
+        println!(
+            "{}",
+            if stopped {
+                "browser session stopped"
+            } else {
+                "no browser session"
+            }
+        );
+        return Ok(0);
+    }
+    if cli.web_status {
+        println!("{}", koto_web::session::status());
+        return Ok(0);
+    }
     // Seat management runs before any program: these manipulate the seat rather
     // than execute inside one.
     if cli.seat_stop {
