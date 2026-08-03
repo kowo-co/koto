@@ -89,7 +89,29 @@ impl Cdp {
             .as_str()
             .ok_or_else(|| CoreError::Backend("CDP did not attach to target".into()))?
             .to_owned();
+        // A profile with saved session state restores its old tabs into the
+        // window we just made. They are not ours to drive and they accumulate
+        // run after run, so close everything except the target we created.
+        // Only safe here: a browser we launched is a browser we own.
+        cdp.close_other_targets(&target)?;
         cdp.enable_page()
+    }
+    fn close_other_targets(&mut self, keep: &str) -> Result<(), CoreError> {
+        let targets = self.request("Target.getTargets", json!({}), None)?["result"]["targetInfos"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for id in targets
+            .iter()
+            .filter(|target| target["type"].as_str() == Some("page"))
+            .filter_map(|target| target["targetId"].as_str())
+            .filter(|id| *id != keep)
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+        {
+            let _ = self.request("Target.closeTarget", json!({"targetId":id}), None);
+        }
+        Ok(())
     }
     /// Attaches a live browser whose parent passed read/write pipe ends as
     /// fd 3 and fd 4, as Chromium specifies for `--remote-debugging-pipe`.
