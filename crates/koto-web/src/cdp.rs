@@ -11,7 +11,7 @@ use std::{
 };
 
 pub struct Cdp {
-    _child: Option<Child>,
+    child: Option<Child>,
     write: UnixStream,
     read: BufReader<UnixStream>,
     next: u64,
@@ -63,7 +63,7 @@ impl Cdp {
             .set_read_timeout(Some(Duration::from_secs(10)))
             .map_err(ioerr)?;
         let mut cdp = Self {
-            _child: Some(child),
+            child: Some(child),
             write: parent_write,
             read: BufReader::new(parent_read),
             next: 1,
@@ -107,7 +107,7 @@ impl Cdp {
         read.set_read_timeout(Some(Duration::from_secs(10)))
             .map_err(ioerr)?;
         let mut cdp = Self {
-            _child: None,
+            child: None,
             write,
             read: BufReader::new(read),
             next: 1,
@@ -240,6 +240,28 @@ impl Cdp {
                 }
                 return Ok(value);
             }
+        }
+    }
+}
+/// A browser this process launched dies with the program; the pipe closing
+/// does not make Chromium exit on its own, and orphaned windows pile up run
+/// after run. An inherited pipe belongs to someone else's browser and is
+/// left alone.
+impl Drop for Cdp {
+    fn drop(&mut self) {
+        if self.child.is_none() {
+            return;
+        }
+        let _ = self.request("Browser.close", json!({}), None);
+        if let Some(child) = self.child.as_mut() {
+            for _ in 0..20 {
+                match child.try_wait() {
+                    Ok(Some(_)) => return,
+                    _ => std::thread::sleep(Duration::from_millis(100)),
+                }
+            }
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 }
