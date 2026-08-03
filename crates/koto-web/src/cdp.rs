@@ -69,7 +69,9 @@ impl Cdp {
             next: 1,
             session: String::new(),
         };
-        let target = cdp.request("Target.createTarget", json!({"url":"about:blank"}), None)?["result"]["targetId"].as_str().ok_or_else(|| CoreError::Backend("CDP did not create a target".into()))?.to_owned();
+        // Chrome already opened a window for the startup URL. Adopt that one:
+        // Target.createTarget would add a second window nobody asked for.
+        let target = cdp.first_page_target()?;
         cdp.session = cdp.request(
             "Target.attachToTarget",
             json!({"targetId":target,"flatten":true}),
@@ -171,6 +173,29 @@ impl Cdp {
             .ok_or_else(|| CoreError::Backend("CDP did not attach to target".into()))?
             .to_owned();
         cdp.enable_page()
+    }
+    /// The startup window's page target. A freshly spawned browser may answer
+    /// before it has one, so poll rather than race it.
+    fn first_page_target(&mut self) -> Result<String, CoreError> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let targets = self.request("Target.getTargets", json!({}), None)?["result"]
+                ["targetInfos"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            if let Some(id) = targets
+                .iter()
+                .find(|target| target["type"].as_str() == Some("page"))
+                .and_then(|target| target["targetId"].as_str())
+            {
+                return Ok(id.to_owned());
+            }
+            if Instant::now() >= deadline {
+                return Err(CoreError::Backend("browser opened no page target".into()));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
     fn enable_page(mut self) -> Result<Self, CoreError> {
         let session = self.session.clone();
